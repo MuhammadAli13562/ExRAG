@@ -13,3 +13,6 @@ log/*
 logs/
 parts/*
 json_results/*
+venv
+md
+results
