@@ -1,14 +1,18 @@
 """
-Simplified markdown to tree converter.
-Converts markdown files to hierarchical tree structure with text content included.
+Core tree building logic from markdown files.
 """
-
 import re
-import os
-import json
+from pathlib import Path
+from typing import Tuple, List, Dict, Any
+import sys
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from common.logging_config import get_logger
+
+logger = get_logger("exrag.tree")
 
 
-def extract_nodes_from_markdown(markdown_content):
+def extract_nodes_from_markdown(markdown_content: str) -> Tuple[List[Dict], List[str]]:
     """Extract all markdown headers from content."""
     header_pattern = r'^(#{1,6})\s+(.+)$'
     code_block_pattern = r'^```'
@@ -39,7 +43,7 @@ def extract_nodes_from_markdown(markdown_content):
     return node_list, lines
 
 
-def extract_node_text_content(node_list, markdown_lines):
+def extract_node_text_content(node_list: List[Dict], markdown_lines: List[str]) -> List[Dict]:
     """Extract text content for each node from markdown lines."""
     all_nodes = []
     for node in node_list:
@@ -47,7 +51,7 @@ def extract_node_text_content(node_list, markdown_lines):
         header_match = re.match(r'^(#{1,6})', line_content)
         
         if header_match is None:
-            print(f"Warning: Line {node['line_num']} does not contain a valid header: '{line_content}'")
+            logger.warning(f"Line {node['line_num']} does not contain a valid header: '{line_content}'")
             continue
             
         processed_node = {
@@ -70,7 +74,7 @@ def extract_node_text_content(node_list, markdown_lines):
     return all_nodes
 
 
-def build_tree_from_nodes(node_list):
+def build_tree_from_nodes(node_list: List[Dict]) -> List[Dict]:
     """Build hierarchical tree structure from flat list of nodes."""
     if not node_list:
         return []
@@ -107,7 +111,7 @@ def build_tree_from_nodes(node_list):
     return root_nodes
 
 
-def clean_empty_nodes(tree_nodes):
+def clean_empty_nodes(tree_nodes: List[Dict]) -> List[Dict]:
     """Remove empty 'nodes' arrays from tree structure."""
     cleaned_nodes = []
     
@@ -127,40 +131,28 @@ def clean_empty_nodes(tree_nodes):
     return cleaned_nodes
 
 
-def md_to_tree(md_path):
-    """
-    Convert markdown file to tree structure with text included.
+def calculate_tree_stats(tree_structure: List[Dict]) -> Tuple[int, int, int]:
+    """Calculate statistics about the tree."""
+    def count_nodes(nodes, current_depth=0):
+        total = len(nodes)
+        max_depth = current_depth
+        for node in nodes:
+            if 'nodes' in node and node['nodes']:
+                child_count, child_depth = count_nodes(node['nodes'], current_depth + 1)
+                total += child_count
+                max_depth = max(max_depth, child_depth)
+        return total, max_depth
     
-    Args:
-        md_path: Path to markdown file
-        
-    Returns:
-        Dictionary with:
-            - doc_name: Name of the markdown file (without extension)
-            - structure: List of tree nodes with title, node_id, text, line_num, and nested nodes
-    """
-    with open(md_path, 'r', encoding='utf-8') as f:
-        markdown_content = f.read()
+    if not tree_structure:
+        return 0, len(tree_structure), 0
     
-    print(f"Extracting nodes from markdown...")
-    node_list, markdown_lines = extract_nodes_from_markdown(markdown_content)
+    total_nodes, max_depth = count_nodes(tree_structure)
+    root_count = len(tree_structure)
     
-    print(f"Extracting text content from nodes...")
-    nodes_with_content = extract_node_text_content(node_list, markdown_lines)
-    
-    print(f"Building tree from nodes...")
-    tree_structure = build_tree_from_nodes(nodes_with_content)
-    
-    print(f"Cleaning tree structure...")
-    tree_structure = clean_empty_nodes(tree_structure)
-    
-    return {
-        'doc_name': os.path.splitext(os.path.basename(md_path))[0],
-        'structure': tree_structure,
-    }
+    return total_nodes, root_count, max_depth
 
 
-def print_tree(tree, indent=0):
+def print_tree(tree: List[Dict], indent: int = 0):
     """Print tree structure in a readable format."""
     for node in tree:
         print('  ' * indent + f"[{node['node_id']}] {node['title']}")
@@ -168,28 +160,33 @@ def print_tree(tree, indent=0):
             print_tree(node['nodes'], indent + 1)
 
 
-if __name__ == "__main__":
-    import sys
+def md_to_tree_data(md_path: Path) -> dict:
+    """
+    Convert markdown file to tree structure (internal function).
     
-    if len(sys.argv) < 2:
-        print("Usage: python md_to_tree_simple.py <markdown_file>")
-        sys.exit(1)
+    Args:
+        md_path: Path to markdown file
+        
+    Returns:
+        Dictionary with doc_name and structure
+    """
+    with open(md_path, 'r', encoding='utf-8') as f:
+        markdown_content = f.read()
     
-    md_file = sys.argv[1]
+    logger.debug("Extracting nodes from markdown...")
+    node_list, markdown_lines = extract_nodes_from_markdown(markdown_content)
     
-    if not os.path.isfile(md_file):
-        print(f"Error: File not found: {md_file}")
-        sys.exit(1)
+    logger.debug("Extracting text content from nodes...")
+    nodes_with_content = extract_node_text_content(node_list, markdown_lines)
     
-    # Convert markdown to tree
-    result = md_to_tree(md_file)
+    logger.debug("Building tree from nodes...")
+    tree_structure = build_tree_from_nodes(nodes_with_content)
     
-    # Save to JSON
-    output_path = f"./results/{result['doc_name']}_structure__simple.json"
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    logger.debug("Cleaning tree structure...")
+    tree_structure = clean_empty_nodes(tree_structure)
     
-    with open(output_path, 'w', encoding='utf-8') as f:
-        json.dump(result, f, indent=2, ensure_ascii=False)
-    
-    print(f"\n✓ Tree structure saved to: {output_path}")
+    return {
+        'doc_name': md_path.stem,
+        'structure': tree_structure,
+    }
 
