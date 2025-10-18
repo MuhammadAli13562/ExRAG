@@ -38,11 +38,6 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")  # DEBUG, INFO, WARNING, ERROR
 LOG_FILE = Path(__file__).parent / "retrieval.log"
 LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
-# LangSmith tracing configuration (optional)
-LANGSMITH_TRACING = os.getenv("LANGSMITH_TRACING", "false").lower() == "true"
-LANGSMITH_API_KEY = os.getenv("LANGSMITH_API_KEY", None)
-LANGSMITH_PROJECT = os.getenv("LANGSMITH_PROJECT", "pageindex-retrieval")
-
 # Configure logging
 def setup_logging():
     """Setup logging configuration for the retrieval system."""
