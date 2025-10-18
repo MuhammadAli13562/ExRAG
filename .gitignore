@@ -16,3 +16,4 @@ json_results/*
 venv
 md
 results
+retrieval/retrieval.log
