@@ -1,0 +1,94 @@
+2025-10-18 21:59:27,248 - retrieval.agent - INFO - Initializing retrieval tools for agent
+2025-10-18 21:59:27,248 - retrieval.tools - INFO - Initializing RetrievalTools with ChromaDB at: /Users/ali-98/data/projects/PageIndex/embeddings/chroma_db
+2025-10-18 21:59:27,301 - retrieval.tools - INFO - Initialized OpenAI embedder (text-embedding-3-small)
+2025-10-18 21:59:27,301 - retrieval.tools - INFO - RetrievalTools initialized successfully
+2025-10-18 21:59:34,183 - retrieval.agent - INFO - ================================================================================
+2025-10-18 21:59:34,183 - retrieval.agent - INFO - Starting agent query: 'whats flemings right hand rule'
+2025-10-18 21:59:34,183 - retrieval.agent - INFO - Title collection: physics_title_indexed
+2025-10-18 21:59:34,184 - retrieval.agent - INFO - Text collection: physics_text_indexed
+2025-10-18 21:59:34,184 - retrieval.agent - INFO - ================================================================================
+2025-10-18 21:59:34,184 - retrieval.agent - INFO - Creating agent graph
+2025-10-18 21:59:34,325 - retrieval.agent - INFO - Invoking agent
+2025-10-18 21:59:34,325 - retrieval.agent - INFO - [AGENT] Iteration 1: Calling LLM
+2025-10-18 21:59:36,100 - retrieval.agent - INFO - [AGENT] LLM requested 2 tool call(s)
+2025-10-18 21:59:36,100 - retrieval.agent - INFO - [DECISION] Continuing with 2 tool call(s)
+2025-10-18 21:59:36,101 - retrieval.agent - INFO - [TOOL] search_by_title called with query='Fleming's Right Hand Rule...', top_k=5
+2025-10-18 21:59:36,102 - retrieval.agent - INFO - [TOOL] search_by_text called with query='Fleming's Right Hand Rule...', top_k=5
+2025-10-18 21:59:36,102 - retrieval.tools - INFO - Title search: query='Fleming's Right Hand Rule...', collection=physics_title_indexed, top_k=5
+2025-10-18 21:59:36,102 - retrieval.tools - INFO - Text search: query='Fleming's Right Hand Rule...', collection=physics_text_indexed, top_k=5
+2025-10-18 21:59:37,627 - retrieval.tools - INFO - Title search returned 5 results
+2025-10-18 21:59:37,627 - retrieval.agent - INFO - [TOOL] search_by_title returned 5 results
+2025-10-18 21:59:37,698 - retrieval.tools - INFO - Text search returned 5 results
+2025-10-18 21:59:37,698 - retrieval.agent - INFO - [TOOL] search_by_text returned 5 results
+2025-10-18 21:59:37,699 - retrieval.agent - INFO - [AGENT] Iteration 2: Calling LLM
+2025-10-18 21:59:39,669 - retrieval.agent - INFO - [AGENT] LLM provided final answer (no tool calls)
+2025-10-18 21:59:39,669 - retrieval.agent - INFO - [DECISION] No tool calls, ending agent execution
+2025-10-18 21:59:39,670 - retrieval.agent - INFO - Agent completed successfully in 2 iterations
+2025-10-18 21:59:39,670 - retrieval.agent - INFO - Answer length: 732 characters
+2025-10-18 22:03:09,467 - retrieval.tools - INFO - Initializing RetrievalTools with ChromaDB at: /Users/ali-98/data/projects/PageIndex/embeddings/chroma_db
+2025-10-18 22:03:09,545 - retrieval.tools - INFO - Initialized OpenAI embedder (text-embedding-3-small)
+2025-10-18 22:03:09,545 - retrieval.tools - INFO - RetrievalTools initialized successfully
+2025-10-18 22:03:35,549 - retrieval.tools - INFO - Text search: query='Fleming's Right Hand Rule...', collection=physics_text_indexed, top_k=5
+2025-10-18 22:03:35,550 - retrieval.tools - INFO - Title search: query='Fleming's Right Hand Rule...', collection=physics_title_indexed, top_k=5
+2025-10-18 22:03:36,478 - retrieval.tools - INFO - Title search returned 5 results
+2025-10-18 22:03:38,490 - retrieval.tools - INFO - Text search returned 5 results
+2025-10-18 22:04:13,457 - retrieval.tools - INFO - Title search: query='Fleming's Left Hand Rule...', collection=physics_title_indexed, top_k=5
+2025-10-18 22:04:13,458 - retrieval.tools - INFO - Text search: query='Fleming's Left Hand Rule...', collection=physics_text_indexed, top_k=5
+2025-10-18 22:04:15,403 - retrieval.tools - INFO - Title search returned 5 results
+2025-10-18 22:04:15,405 - retrieval.tools - INFO - Text search returned 5 results
+2025-10-18 22:04:16,589 - retrieval.tools - INFO - Exploring nodes: node_id=0705, direction=both, count=3
+2025-10-18 22:04:16,590 - retrieval.tools - INFO - Loading JSON file: results/physics_structure.json
+2025-10-18 22:04:16,590 - retrieval.tools - ERROR - Failed to load JSON for collection physics_title_indexed: [Errno 2] No such file or directory: 'results/physics_structure.json'
+Traceback (most recent call last):
+  File "/Users/ali-98/data/projects/PageIndex/retrieval/tools.py", line 71, in _load_json_from_collection
+    with open(json_path, 'r', encoding='utf-8') as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'results/physics_structure.json'
+2025-10-18 22:04:16,592 - retrieval.tools - ERROR - Node exploration failed: Failed to load JSON for collection physics_title_indexed: [Errno 2] No such file or directory: 'results/physics_structure.json'
+Traceback (most recent call last):
+  File "/Users/ali-98/data/projects/PageIndex/retrieval/tools.py", line 71, in _load_json_from_collection
+    with open(json_path, 'r', encoding='utf-8') as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'results/physics_structure.json'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/ali-98/data/projects/PageIndex/retrieval/tools.py", line 249, in explore_nodes
+    nodes = self._load_json_from_collection(collection_name)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/ali-98/data/projects/PageIndex/retrieval/tools.py", line 98, in _load_json_from_collection
+    raise RuntimeError(f"Failed to load JSON for collection {collection_name}: {e}")
+RuntimeError: Failed to load JSON for collection physics_title_indexed: [Errno 2] No such file or directory: 'results/physics_structure.json'
+2025-10-18 22:06:16,994 - retrieval.tools - INFO - Initializing RetrievalTools with ChromaDB at: /Users/ali-98/data/projects/PageIndex/embeddings/chroma_db
+2025-10-18 22:06:17,050 - retrieval.tools - INFO - Initialized OpenAI embedder (text-embedding-3-small)
+2025-10-18 22:06:17,050 - retrieval.tools - INFO - RetrievalTools initialized successfully
+2025-10-18 22:06:19,653 - retrieval.tools - INFO - Title search: query='electric charges...', collection=physics_title_indexed, top_k=5
+2025-10-18 22:06:19,653 - retrieval.tools - INFO - Text search: query='two kinds of electric charges...', collection=physics_text_indexed, top_k=5
+2025-10-18 22:06:21,289 - retrieval.tools - INFO - Title search returned 5 results
+2025-10-18 22:06:21,884 - retrieval.tools - INFO - Text search returned 5 results
+2025-10-18 22:07:44,110 - retrieval.tools - INFO - Initializing RetrievalTools with ChromaDB at: /Users/ali-98/data/projects/PageIndex/embeddings/chroma_db
+2025-10-18 22:07:44,164 - retrieval.tools - INFO - Initialized OpenAI embedder (text-embedding-3-small)
+2025-10-18 22:07:44,164 - retrieval.tools - INFO - RetrievalTools initialized successfully
+2025-10-18 22:08:00,168 - retrieval.tools - INFO - Title search: query='Fleming's Right Hand Rule...', collection=physics_title_indexed, top_k=5
+2025-10-18 22:08:00,169 - retrieval.tools - INFO - Text search: query='Fleming's Right Hand Rule...', collection=physics_text_indexed, top_k=5
+2025-10-18 22:08:01,785 - retrieval.tools - INFO - Text search returned 5 results
+2025-10-18 22:08:01,992 - retrieval.tools - INFO - Title search returned 5 results
+2025-10-18 22:08:30,987 - retrieval.tools - INFO - Title search: query='Fleming's Right Hand Rule...', collection=physics_title_indexed, top_k=5
+2025-10-18 22:08:30,988 - retrieval.tools - INFO - Text search: query='Fleming's Right Hand Rule...', collection=physics_text_indexed, top_k=5
+2025-10-18 22:08:31,840 - retrieval.tools - INFO - Text search returned 5 results
+2025-10-18 22:08:32,053 - retrieval.tools - INFO - Title search returned 5 results
+2025-10-18 22:10:22,974 - retrieval.tools - INFO - Title search: query='Example 10 Parallel connection...', collection=physics_title_indexed, top_k=5
+2025-10-18 22:10:24,966 - retrieval.tools - INFO - Title search returned 5 results
+2025-10-18 22:10:26,490 - retrieval.tools - INFO - Exploring nodes: node_id=0287, direction=down, count=3
+2025-10-18 22:10:26,491 - retrieval.tools - INFO - Loading JSON file: /Users/ali-98/data/projects/PageIndex/results/physics_structure.json
+2025-10-18 22:10:26,500 - retrieval.tools - INFO - Cached 1118 nodes from /Users/ali-98/data/projects/PageIndex/results/physics_structure.json
+2025-10-18 22:10:26,500 - retrieval.tools - INFO - Exploration complete: 0 above, 3 below
+2025-10-18 22:13:43,147 - retrieval.tools - INFO - Title search: query='Revision 6...', collection=physics_title_indexed, top_k=5
+2025-10-18 22:13:44,710 - retrieval.tools - INFO - Title search returned 5 results
+2025-10-18 22:13:46,452 - retrieval.tools - INFO - Exploring nodes: node_id=0820, direction=down, count=3
+2025-10-18 22:13:46,453 - retrieval.tools - INFO - Exploration complete: 0 above, 3 below
+2025-10-18 22:22:07,337 - retrieval.tools - INFO - Title search: query='Example 10...', collection=physics_title_indexed, top_k=5
+2025-10-18 22:22:09,203 - retrieval.tools - INFO - Title search returned 5 results
+2025-10-18 22:22:10,450 - retrieval.tools - INFO - Exploring nodes: node_id=0105, direction=both, count=3
+2025-10-18 22:22:10,452 - retrieval.tools - INFO - Exploration complete: 3 above, 3 below
