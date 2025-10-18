@@ -56,6 +56,12 @@ def main():
         metavar="COLLECTION_NAME",
         help="Show information about a collection"
     )
+    parser.add_argument(
+        "--delete",
+        type=str,
+        metavar="COLLECTION_NAME",
+        help="Delete a collection from ChromaDB"
+    )
     
     args = parser.parse_args()
     
@@ -79,6 +85,31 @@ def main():
         print(f"Vector count: {info['count']}")
         print(f"Metadata: {info['metadata']}")
         return 0
+    
+    if args.delete:
+        # Confirm deletion
+        collection_info = indexer.get_collection_info(args.delete)
+        if "error" in collection_info:
+            print(f"Error: Collection '{args.delete}' not found")
+            return 1
+        
+        print(f"\n⚠️  WARNING: You are about to delete collection: {args.delete}")
+        print(f"   Vectors: {collection_info.get('count', 0)}")
+        print(f"   Metadata: {collection_info.get('metadata', {})}")
+        
+        # Ask for confirmation
+        confirm = input("\nType 'DELETE' to confirm: ")
+        if confirm != "DELETE":
+            print("❌ Deletion cancelled.")
+            return 0
+        
+        # Perform deletion
+        if indexer.delete_collection(args.delete):
+            print(f"✅ Collection '{args.delete}' successfully deleted.")
+            return 0
+        else:
+            print(f"❌ Failed to delete collection '{args.delete}'")
+            return 1
     
     # Main indexing command
     if not args.json_path:

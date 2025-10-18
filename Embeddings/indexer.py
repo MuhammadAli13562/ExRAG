@@ -274,4 +274,21 @@ class VectorIndexer:
             }
         except Exception as e:
             return {"error": str(e)}
+    
+    def delete_collection(self, collection_name: str) -> bool:
+        """
+        Delete a collection from ChromaDB.
+        
+        Args:
+            collection_name: Name of the collection to delete
+            
+        Returns:
+            True if successfully deleted, False otherwise
+        """
+        try:
+            self.client.delete_collection(collection_name)
+            return True
+        except Exception as e:
+            print(f"Error deleting collection: {e}")
+            return False
 
