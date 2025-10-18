@@ -5,6 +5,8 @@ Vectorization system for creating ChromaDB collections from flat JSON tree files
 ## Features
 
 - **Atomic node embeddings**: One embedding per node, preserving full granularity
+- **Flexible field indexing**: Index on `title`, `text`, `summary`, or `prefix_summary` ✨ NEW
+- **Node reconciliation**: Display full node data regardless of indexed field ✨ NEW
 - **Rich metadata extraction**: Chapters, sections, page numbers, anchor types, heading levels
 - **Batch processing**: Efficient OpenAI API usage with progress tracking
 - **Unique collections**: Each JSON file gets its own named collection

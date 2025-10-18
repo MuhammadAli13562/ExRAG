@@ -96,7 +96,7 @@ class VectorIndexer:
         
         return valid_nodes
     
-    def create_or_reset_collection(self, collection_name: str, reset: bool = False):
+    def create_or_reset_collection(self, collection_name: str, reset: bool = False, index_field: str = "text", json_path: str = None):
         """Create or get existing collection."""
         if reset:
             try:
@@ -105,13 +105,20 @@ class VectorIndexer:
             except Exception:
                 pass  # Collection didn't exist
         
+        metadata = {
+            "hnsw:space": "cosine",
+            "embedding_model": EMBEDDING_MODEL,
+            "embedding_dimension": str(EMBEDDING_DIMENSION),
+            "index_field": index_field,
+        }
+        
+        # Store JSON source path for node lookup (use absolute path)
+        if json_path:
+            metadata["json_source"] = str(Path(json_path).absolute())
+        
         collection = self.client.get_or_create_collection(
             name=collection_name,
-            metadata={
-                "hnsw:space": "cosine",
-                "embedding_model": EMBEDDING_MODEL,
-                "embedding_dimension": str(EMBEDDING_DIMENSION),
-            }
+            metadata=metadata
         )
         
         return collection
@@ -121,6 +128,8 @@ class VectorIndexer:
         nodes: List[Dict[str, Any]],
         collection_name: str,
         reset: bool = False,
+        index_field: str = "text",
+        json_path: Path = None,
     ) -> Dict[str, Any]:
         """
         Index all nodes into ChromaDB collection with batch embedding.
@@ -129,20 +138,24 @@ class VectorIndexer:
             nodes: List of node dictionaries
             collection_name: Name for ChromaDB collection
             reset: If True, delete existing collection first
+            index_field: Which field to embed (text, title, summary, etc.)
             
         Returns:
             Statistics about the indexing process
         """
-        collection = self.create_or_reset_collection(collection_name, reset=reset)
+        collection = self.create_or_reset_collection(collection_name, reset=reset, index_field=index_field, json_path=json_path)
         
         stats = {
             "total_nodes": len(nodes),
             "batches": 0,
             "indexed": 0,
             "failed": 0,
+            "skipped": 0,
+            "index_field": index_field,
         }
         
         print(f"\nIndexing {len(nodes)} nodes into collection '{collection_name}'")
+        print(f"Index field: {index_field}")
         print(f"Batch size: {BATCH_SIZE}")
         
         # Process in batches with progress bar
@@ -150,24 +163,43 @@ class VectorIndexer:
             batch_nodes = nodes[i:i + BATCH_SIZE]
             
             try:
-                # Extract texts and metadata
-                texts = [node.get("text", "") for node in batch_nodes]
-                ids = [node.get("node_id", f"node_{j}") for j, node in enumerate(batch_nodes, start=i)]
-                metadatas = [extract_metadata(node) for node in batch_nodes]
+                # Extract content from the specified field
+                texts = []
+                valid_nodes = []
+                valid_ids = []
+                valid_metadatas = []
+                
+                for j, node in enumerate(batch_nodes):
+                    # Get content from the specified field
+                    content = node.get(index_field, "")
+                    
+                    # Skip nodes without the specified field or empty content
+                    if not content or not content.strip():
+                        stats["skipped"] += 1
+                        continue
+                    
+                    texts.append(content)
+                    valid_nodes.append(node)
+                    valid_ids.append(node.get("node_id", f"node_{i + j}"))
+                    valid_metadatas.append(extract_metadata(node))
+                
+                # Skip batch if no valid nodes
+                if not texts:
+                    continue
                 
                 # Generate embeddings
                 embeddings = self.embedder.embed_batch(texts)
                 
-                # Add to ChromaDB
+                # Add to ChromaDB (store original text field for display)
                 collection.add(
-                    ids=ids,
+                    ids=valid_ids,
                     embeddings=embeddings,
-                    documents=texts,
-                    metadatas=metadatas,
+                    documents=texts,  # Store the indexed field content
+                    metadatas=valid_metadatas,
                 )
                 
                 stats["batches"] += 1
-                stats["indexed"] += len(batch_nodes)
+                stats["indexed"] += len(valid_nodes)
                 
             except Exception as e:
                 print(f"\n  Error indexing batch {i//BATCH_SIZE + 1}: {e}")
@@ -180,6 +212,7 @@ class VectorIndexer:
         json_path: Path,
         collection_name: str = None,
         reset: bool = False,
+        index_field: str = "text",
     ) -> Dict[str, Any]:
         """
         Complete pipeline: load JSON, create collection, index nodes.
@@ -188,6 +221,7 @@ class VectorIndexer:
             json_path: Path to JSON tree file
             collection_name: Optional custom collection name
             reset: If True, delete existing collection first
+            index_field: Which field to embed (text, title, summary, etc.)
             
         Returns:
             Statistics dictionary
@@ -207,18 +241,20 @@ class VectorIndexer:
         print(f"Source: {json_path}")
         print(f"Collection: {collection_name}")
         print(f"Model: {EMBEDDING_MODEL}")
+        print(f"Index Field: {index_field}")
         print(f"{'='*60}\n")
         
         # Load nodes
         nodes = self.load_json_nodes(json_path)
         
         # Index with embeddings
-        stats = self.index_nodes(nodes, collection_name, reset=reset)
+        stats = self.index_nodes(nodes, collection_name, reset=reset, index_field=index_field, json_path=json_path)
         
         # Add metadata
         stats["collection_name"] = collection_name
         stats["json_file"] = str(json_path)
         stats["model"] = EMBEDDING_MODEL
+        stats["index_field"] = index_field
         
         return stats
     

@@ -32,6 +32,17 @@ python run_indexer.py ../results/physics_structure.json
 python run_indexer.py ../results/physics_structure.json --collection-name my_physics_book
 ```
 
+**✨ NEW: Index by specific field (title, summary, etc.):**
+```bash
+# Index by title instead of full text
+python run_indexer.py ../results/physics_structure.json --index-field title
+
+# Index by summary
+python run_indexer.py ../results/physics_structure.json --index-field summary
+```
+
+See [`INDEX_FIELD_GUIDE.md`](INDEX_FIELD_GUIDE.md) for detailed field-based indexing strategies.
+
 **Reset existing collection:**
 ```bash
 python run_indexer.py ../results/physics_structure.json --reset

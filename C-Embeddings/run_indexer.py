@@ -36,6 +36,13 @@ def main():
         action="store_true",
         help="Delete existing collection before indexing"
     )
+    parser.add_argument(
+        "--index-field",
+        type=str,
+        default="text",
+        choices=["text", "title", "summary", "prefix_summary"],
+        help="Which field to index (default: text). Options: text, title, summary, prefix_summary"
+    )
     
     # Info commands
     parser.add_argument(
@@ -83,6 +90,7 @@ def main():
             json_path=args.json_path,
             collection_name=args.collection_name,
             reset=args.reset,
+            index_field=args.index_field,
         )
         
         # Print summary
@@ -90,8 +98,10 @@ def main():
         print("Indexing Complete")
         print(f"{'='*60}")
         print(f"Collection: {stats['collection_name']}")
+        print(f"Index Field: {stats.get('index_field', 'text')}")
         print(f"Total nodes: {stats['total_nodes']}")
         print(f"Indexed: {stats['indexed']}")
+        print(f"Skipped: {stats.get('skipped', 0)} (empty/missing field)")
         print(f"Failed: {stats['failed']}")
         print(f"Batches: {stats['batches']}")
         print(f"{'='*60}\n")

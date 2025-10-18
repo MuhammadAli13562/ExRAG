@@ -17,6 +17,7 @@ try:
     from indexer import VectorIndexer
     from config import EMBEDDING_MODEL
     from embedder import Embedder
+    from node_loader import get_cached_node_map, get_node_by_id
 except ImportError as e:
     st.error(f"❌ Import Error: {e}")
     st.error(f"Current working directory: {Path.cwd()}")
@@ -32,120 +33,83 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for beautiful styling
+# Custom CSS for clean, readable styling
 st.markdown("""
 <style>
     /* Main container */
     .main {
         padding: 2rem;
+        max-width: 1400px;
+        margin: 0 auto;
     }
     
-    /* Result cards */
-    .result-card {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        padding: 1.5rem;
-        border-radius: 12px;
-        margin-bottom: 1rem;
-        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-        color: white;
-        transition: transform 0.2s;
-    }
-    
-    .result-card:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 6px 12px rgba(0, 0, 0, 0.15);
-    }
-    
-    .result-header {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        margin-bottom: 1rem;
-    }
-    
-    .result-title {
-        font-size: 1.2rem;
-        font-weight: 600;
-        margin: 0;
-    }
-    
-    .similarity-badge {
-        background: rgba(255, 255, 255, 0.2);
-        padding: 0.25rem 0.75rem;
-        border-radius: 20px;
-        font-size: 0.9rem;
-        font-weight: 500;
-    }
-    
-    .metadata-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-        gap: 0.5rem;
-        margin-bottom: 1rem;
-    }
-    
-    .metadata-item {
-        background: rgba(255, 255, 255, 0.1);
-        padding: 0.5rem;
-        border-radius: 6px;
-        font-size: 0.85rem;
-    }
-    
-    .metadata-label {
-        font-weight: 600;
-        opacity: 0.8;
-    }
-    
-    .text-preview {
-        background: rgba(255, 255, 255, 0.15);
-        padding: 1rem;
+    /* Clean result cards */
+    .stContainer {
+        background: white;
         border-radius: 8px;
-        font-family: 'Courier New', monospace;
-        font-size: 0.9rem;
-        line-height: 1.6;
-        margin-top: 1rem;
-    }
-    
-    /* Sidebar styling */
-    .sidebar .sidebar-content {
-        background: linear-gradient(180deg, #667eea 0%, #764ba2 100%);
+        padding: 1.5rem;
+        margin-bottom: 1.5rem;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+        border: 1px solid #e5e7eb;
     }
     
     /* Headers */
-    h1 {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        font-weight: 700;
-    }
-    
-    /* Stats cards */
-    .stats-card {
-        background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
-        padding: 1rem;
-        border-radius: 10px;
-        text-align: center;
-        color: white;
-        margin-bottom: 1rem;
-    }
-    
-    .stats-number {
-        font-size: 2rem;
-        font-weight: 700;
-        margin: 0;
-    }
-    
-    .stats-label {
-        font-size: 0.9rem;
-        opacity: 0.9;
-    }
-    
-    /* Expander styling */
-    .streamlit-expanderHeader {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white;
-        border-radius: 8px;
+    h1, h2, h3 {
+        color: #1f2937;
         font-weight: 600;
+    }
+    
+    /* Expander headers - clean and readable */
+    .streamlit-expanderHeader {
+        background-color: #f3f4f6 !important;
+        border: 1px solid #e5e7eb !important;
+        border-radius: 6px !important;
+        color: #1f2937 !important;
+        font-weight: 500 !important;
+        padding: 0.75rem 1rem !important;
+    }
+    
+    .streamlit-expanderHeader:hover {
+        background-color: #e5e7eb !important;
+    }
+    
+    /* Expander content */
+    .streamlit-expanderContent {
+        border: 1px solid #e5e7eb;
+        border-top: none;
+        border-radius: 0 0 6px 6px;
+        padding: 1rem;
+        background-color: #fafafa;
+    }
+    
+    /* Metrics styling */
+    [data-testid="stMetricValue"] {
+        font-size: 1.5rem;
+        color: #1f2937;
+    }
+    
+    /* Caption text */
+    .st-emotion-cache-16idsys p {
+        color: #6b7280 !important;
+        font-size: 0.85rem;
+    }
+    
+    /* Buttons */
+    .stButton button {
+        border-radius: 6px;
+        font-weight: 500;
+    }
+    
+    /* Remove default streamlit padding */
+    .block-container {
+        padding-top: 2rem;
+    }
+    
+    /* Text areas */
+    textarea {
+        font-family: 'SF Mono', 'Monaco', 'Courier New', monospace !important;
+        font-size: 0.9rem !important;
+        line-height: 1.6 !important;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -167,84 +131,105 @@ def generate_query_embedding(_embedder, query_text: str):
     return _embedder.embed_single(query_text)
 
 
-def display_result_card(rank, result_data):
-    """Display a single result as a beautiful card."""
-    doc = result_data['document']
+def display_result_card(rank, result_data, full_node=None, index_field="text"):
+    """Display a single result as a clean expandable card."""
+    doc = result_data['document']  # This is the indexed field content
     metadata = result_data['metadata']
     distance = result_data['distance']
     similarity = 1 - distance
     
+    # Use full node data if available
+    if full_node:
+        display_title = full_node.get('title', metadata.get('title', 'Untitled'))
+        full_text = full_node.get('text', '')
+        summary = full_node.get('summary', '')
+        prefix_summary = full_node.get('prefix_summary', '')
+        line_num = full_node.get('line_num', metadata.get('line_num', 'N/A'))
+    else:
+        display_title = metadata.get('title', 'Untitled')
+        full_text = doc if index_field == 'text' else ''
+        summary = metadata.get('summary', '')
+        prefix_summary = ''
+        line_num = metadata.get('line_num', 'N/A')
+    
     # Create unique key for this result
     card_key = f"result_{rank}_{metadata.get('node_id', rank)}"
     
-    # Result card container
+    # Result card container with cleaner styling
     with st.container():
-        # Header with rank and similarity
-        col1, col2 = st.columns([3, 1])
+        # Header with rank, title, and similarity
+        col1, col2 = st.columns([4, 1])
         with col1:
-            st.markdown(f"### 🎯 Rank {rank}: {metadata.get('title', 'Untitled')}")
+            st.markdown(f"### 🎯 Rank {rank}")
+            st.markdown(f"**{display_title}**")
         with col2:
-            similarity_color = "#4ade80" if similarity > 0.8 else "#fbbf24" if similarity > 0.6 else "#f87171"
+            similarity_color = "#10b981" if similarity > 0.8 else "#f59e0b" if similarity > 0.6 else "#ef4444"
             st.markdown(
-                f"<div style='text-align: right; font-size: 1.1rem;'>"
-                f"<span style='background: {similarity_color}; color: white; padding: 0.25rem 0.75rem; "
-                f"border-radius: 20px; font-weight: 600;'>✨ {similarity:.1%}</span></div>",
+                f"<div style='text-align: right; padding-top: 0.5rem;'>"
+                f"<span style='background: {similarity_color}; color: white; padding: 0.4rem 0.8rem; "
+                f"border-radius: 20px; font-weight: 600; font-size: 0.95rem;'>Match: {similarity:.1%}</span></div>",
                 unsafe_allow_html=True
             )
         
-        # Metadata grid
+        # Compact metadata row
         col1, col2, col3, col4, col5 = st.columns(5)
         with col1:
-            st.metric("📚 Chapter", metadata.get('chapter', 'N/A'))
+            st.caption(f"📚 Ch. {metadata.get('chapter', 'N/A')}")
         with col2:
-            st.metric("📄 Page", metadata.get('page_num', 'N/A'))
+            st.caption(f"📄 Pg. {metadata.get('page_num', 'N/A')}")
         with col3:
-            st.metric("🔖 Node ID", metadata.get('node_id', 'N/A'))
+            st.caption(f"🔖 ID: {metadata.get('node_id', 'N/A')}")
         with col4:
-            st.metric("📍 Line", metadata.get('line_num', 'N/A'))
+            st.caption(f"📍 Line: {line_num}")
         with col5:
-            anchor = metadata.get('anchor_type', 'N/A')
-            if anchor and anchor != 'N/A':
-                st.metric("🎯 Type", anchor)
-            else:
-                st.metric("📊 Tokens", metadata.get('token_count', 'N/A'))
+            anchor = metadata.get('anchor_type', '')
+            if anchor:
+                st.caption(f"🎯 {anchor}")
         
-        # Text preview (first 300 chars)
-        preview_length = 300
-        preview = doc[:preview_length]
-        if len(doc) > preview_length:
-            preview += "..."
+        st.markdown("---")
         
-        st.markdown(f"""
-        <div style='background: linear-gradient(135deg, rgba(102, 126, 234, 0.1) 0%, rgba(118, 75, 162, 0.1) 100%); 
-                    padding: 1rem; border-radius: 8px; border-left: 4px solid #667eea; margin: 1rem 0;'>
-            <div style='font-family: "SF Pro Display", -apple-system, sans-serif; line-height: 1.6; color: #1f2937;'>
-                {preview}
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
+        # Expandable fields
+        if summary and summary.strip():
+            with st.expander("📝 **Summary**", expanded=False):
+                st.markdown(f"""
+                <div style='background: #f9fafb; padding: 1rem; border-radius: 8px; 
+                            border-left: 3px solid #3b82f6; color: #1f2937; line-height: 1.6;'>
+                    {summary}
+                </div>
+                """, unsafe_allow_html=True)
         
-        # Expandable full text
-        with st.expander("📖 View Full Text"):
-            st.text_area(
-                "Full Content",
-                value=doc,
-                height=200,
-                key=f"text_{card_key}",
-                label_visibility="collapsed"
-            )
-            
-            # Additional metadata
-            st.markdown("**Additional Metadata:**")
+        if prefix_summary and prefix_summary.strip():
+            with st.expander("📋 **Prefix Summary**", expanded=False):
+                st.markdown(f"""
+                <div style='background: #f9fafb; padding: 1rem; border-radius: 8px; 
+                            border-left: 3px solid #8b5cf6; color: #1f2937; line-height: 1.6;'>
+                    {prefix_summary}
+                </div>
+                """, unsafe_allow_html=True)
+        
+        if full_text and full_text.strip():
+            with st.expander("📄 **Full Text**", expanded=False):
+                st.markdown(f"""
+                <div style='background: #f9fafb; padding: 1rem; border-radius: 8px; 
+                            border-left: 3px solid #10b981; color: #1f2937; line-height: 1.6; 
+                            font-family: "SF Mono", monospace; font-size: 0.9rem; white-space: pre-wrap;'>
+                    {full_text}
+                </div>
+                """, unsafe_allow_html=True)
+        
+        # Indexed field indicator
+        with st.expander("ℹ️ **Metadata & Details**", expanded=False):
             meta_col1, meta_col2 = st.columns(2)
             with meta_col1:
+                st.text(f"Indexed Field: {index_field}")
                 st.text(f"Section: {metadata.get('section', 'N/A')}")
                 st.text(f"Heading Level: {metadata.get('heading_level', 'N/A')}")
             with meta_col2:
+                st.text(f"Token Count: {metadata.get('token_count', 'N/A')}")
                 st.text(f"All Pages: {metadata.get('all_pages', 'N/A')}")
-                st.text(f"Summary Available: {'Yes' if metadata.get('summary') else 'No'}")
+                st.text(f"Distance: {distance:.4f}")
         
-        st.markdown("---")
+        st.markdown("<hr style='margin: 2rem 0; border: none; border-top: 2px solid #e5e7eb;'>", unsafe_allow_html=True)
 
 
 def main():
@@ -283,14 +268,17 @@ def main():
         # Get collection info
         if selected_collection:
             collection_info = indexer.get_collection_info(selected_collection)
+            collection_metadata = collection_info.get('metadata', {})
+            index_field = collection_metadata.get('index_field', 'text')
             
             st.markdown("### 📈 Collection Stats")
             st.metric("Total Vectors", collection_info.get('count', 0))
             st.metric("Embedding Model", EMBEDDING_MODEL)
+            st.metric("🎯 Indexed Field", index_field.title())
             
             # Show metadata
             with st.expander("ℹ️ Collection Details"):
-                st.json(collection_info.get('metadata', {}))
+                st.json(collection_metadata)
         
         st.markdown("---")
         
@@ -337,8 +325,10 @@ def main():
         
         with st.spinner("🔍 Searching vector database..."):
             try:
-                # Get collection
+                # Get collection and its metadata
                 collection = indexer.client.get_collection(selected_collection)
+                collection_info = indexer.get_collection_info(selected_collection)
+                search_metadata = collection_info.get('metadata', {})
                 
                 # Build filter conditions
                 where_filter = {}
@@ -364,6 +354,40 @@ def main():
                 )
                 query_time = time.time() - query_start
                 total_time = time.time() - start_time
+                
+                # Load node map from JSON source if available
+                node_map = None
+                json_source = search_metadata.get('json_source')
+                if json_source:
+                    try:
+                        from pathlib import Path
+                        json_path = Path(json_source)
+                        
+                        # Try multiple path resolutions
+                        possible_paths = [
+                            json_path,  # As-is
+                            Path.cwd() / json_path,  # Relative to current dir
+                            Path.cwd().parent / json_path,  # Relative to parent dir
+                            Path(__file__).parent.parent / json_path,  # Relative to C-Embeddings parent
+                        ]
+                        
+                        found_path = None
+                        for path in possible_paths:
+                            if path.exists():
+                                found_path = path
+                                break
+                        
+                        if found_path:
+                            node_map = get_cached_node_map(str(found_path))
+                            st.success(f"✅ Loaded {len(node_map)} nodes from: {found_path.name}")
+                        else:
+                            st.warning(f"⚠️ JSON source not found. Tried: {json_source}")
+                            st.caption(f"Searched in: {', '.join(str(p.parent) for p in possible_paths[:3])}")
+                    except Exception as e:
+                        st.warning(f"⚠️ Could not load source JSON for full node data: {e}")
+                        st.exception(e)
+                else:
+                    st.info("ℹ️ No JSON source in collection metadata. Re-index to enable full node display.")
                 
                 # Display results
                 if results and results['documents'][0]:
@@ -406,7 +430,30 @@ def main():
                             'metadata': metadata,
                             'distance': distance
                         }
-                        display_result_card(i, result_data)
+                        
+                        # Get full node if node_map available
+                        full_node = None
+                        if node_map and metadata.get('node_id'):
+                            full_node = get_node_by_id(node_map, metadata['node_id'])
+                            if not full_node:
+                                st.warning(f"⚠️ Node {metadata['node_id']} not found in source JSON")
+                        
+                        # Get index field from metadata
+                        index_field = search_metadata.get('index_field', 'text')
+                        
+                        # Debug info in expander
+                        if i == 1:  # Only show for first result
+                            with st.expander("🔍 Debug Info (First Result)", expanded=False):
+                                st.text(f"Node Map Loaded: {node_map is not None}")
+                                st.text(f"Node ID: {metadata.get('node_id')}")
+                                st.text(f"Full Node Retrieved: {full_node is not None}")
+                                if full_node:
+                                    st.text(f"Full Node has 'text': {'text' in full_node}")
+                                    st.text(f"Text length: {len(full_node.get('text', ''))}")
+                                    st.json({k: f"{str(v)[:50]}..." if len(str(v)) > 50 else v 
+                                            for k, v in full_node.items() if k != 'text'})
+                        
+                        display_result_card(i, result_data, full_node=full_node, index_field=index_field)
                 
                 else:
                     st.warning("⚠️ No results found. Try adjusting your query or filters.")
