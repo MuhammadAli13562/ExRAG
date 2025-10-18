@@ -10,7 +10,7 @@ from pathlib import Path
 from collections import Counter
 
 sys.path.insert(0, str(Path(__file__).parent))
-from metadata_extractor import extract_metadata, is_valid_node
+from .metadata_extractor import extract_metadata, is_valid_node
 
 
 def validate_json_file(json_path: Path):

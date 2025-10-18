@@ -3,7 +3,7 @@ Extract structured metadata from JSON nodes for enhanced filtering and retrieval
 """
 import re
 from typing import Dict, Any, Optional, List
-from config import PAGE_PATTERN, CHAPTER_PATTERN, SECTION_PATTERN, ANCHOR_KEYWORDS
+from .config import PAGE_PATTERN, CHAPTER_PATTERN, SECTION_PATTERN, ANCHOR_KEYWORDS
 
 
 def extract_page_numbers(text: str) -> List[int]:

@@ -11,8 +11,8 @@ import argparse
 import sys
 from pathlib import Path
 
-from agent import query_agent
-from tools import RetrievalTools
+from .agent import query_agent
+from .tools import RetrievalTools
 
 
 def interactive_mode(title_collection: str, text_collection: str):

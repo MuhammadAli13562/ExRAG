@@ -4,7 +4,7 @@ Embedding generation using OpenAI API.
 import time
 from typing import List
 from openai import OpenAI
-from config import (
+from .config import (
     EMBEDDING_MODEL,
     EMBEDDING_PROVIDER,
     OPENAI_API_KEY,

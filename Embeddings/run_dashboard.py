@@ -10,8 +10,8 @@ import subprocess
 from pathlib import Path
 
 def main():
-    # Change to C-Embeddings directory
-    project_root = Path(__file__).parent
+    # Change to project root (parent of embeddings directory)
+    project_root = Path(__file__).parent.parent
     
     # Run streamlit from the project root
     cmd = [
@@ -19,7 +19,7 @@ def main():
         "-m",
         "streamlit",
         "run",
-        "dashboard/app.py",
+        "embeddings/dashboard/app.py",
         "--server.port",
         "8501",
         "--server.address",

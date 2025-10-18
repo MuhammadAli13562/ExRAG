@@ -11,7 +11,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from indexer import VectorIndexer
+from .indexer import VectorIndexer
 
 
 def main():

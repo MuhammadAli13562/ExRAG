@@ -3,7 +3,7 @@ Top-level CLI wrapper for the ExRAG pipeline.
 Provides a unified interface to all pipeline stages.
 """
 from pathlib import Path
-from typing import Optional, Literal
+from typing import Optional
 import typer
 import sys
 
@@ -26,7 +26,7 @@ app = typer.Typer(
 def tree_command(
     md_file: Path = typer.Argument(..., help="Path to markdown file", exists=True),
     output: Optional[Path] = typer.Option(None, "--output", "-o", help="Output JSON path"),
-    mode: Literal["simple", "full"] = typer.Option("full", "--mode", "-m", help="Build mode"),
+    mode: str = typer.Option("full", "--mode", "-m", help="Build mode (simple or full)"),
     force: bool = typer.Option(False, "--force", "-f", help="Force rebuild"),
     json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose logging"),
@@ -59,8 +59,6 @@ def tree_command(
             typer.secho(f"{status}: {result.output_path}", fg=color)
             typer.echo(f"  Total nodes: {result.total_nodes}, Max depth: {result.max_depth}")
         
-        raise typer.Exit(0)
-        
     except Exception as e:
         logger.error(f"Tree build failed: {e}", exc_info=verbose)
         typer.secho(f"✗ Error: {e}", fg=typer.colors.RED, err=True)
@@ -72,7 +70,7 @@ def tree_command(
 @app.command("embed")
 def embed_command(
     tree_json: Path = typer.Argument(..., help="Path to tree JSON file", exists=True),
-    which: Literal["titles", "texts", "both"] = typer.Option("both", "--which", "-w", help="Which indexes to build"),
+    which: str = typer.Option("both", "--which", "-w", help="Which indexes to build (titles, texts, or both)"),
     prefix: Optional[str] = typer.Option(None, "--prefix", "-p", help="Collection name prefix"),
     reset: bool = typer.Option(False, "--reset", "-r", help="Reset existing collections"),
     model: Optional[str] = typer.Option(None, "--model", "-m", help="Embedding model"),
@@ -117,8 +115,6 @@ def embed_command(
                 typer.echo(f"  Title collection: {result.title_stats.collection_name}")
             if result.text_stats:
                 typer.echo(f"  Text collection: {result.text_stats.collection_name}")
-        
-        raise typer.Exit(0)
         
     except Exception as e:
         logger.error(f"Embedding failed: {e}", exc_info=verbose)
@@ -173,8 +169,6 @@ def query_command(
             typer.echo(result.answer)
             typer.secho("="*80 + "\n", fg=typer.colors.CYAN)
         
-        raise typer.Exit(0)
-        
     except Exception as e:
         logger.error(f"Query failed: {e}", exc_info=verbose)
         typer.secho(f"✗ Error: {e}", fg=typer.colors.RED, err=True)
@@ -186,8 +180,8 @@ def query_command(
 @app.command("pipeline")
 def pipeline_command(
     md_file: Path = typer.Argument(..., help="Path to markdown file", exists=True),
-    mode: Literal["simple", "full"] = typer.Option("full", "--mode", help="Tree build mode"),
-    which: Literal["titles", "texts", "both"] = typer.Option("both", "--which", "-w", help="Which indexes"),
+    mode: str = typer.Option("full", "--mode", help="Tree build mode (simple or full)"),
+    which: str = typer.Option("both", "--which", "-w", help="Which indexes (titles, texts, or both)"),
     prefix: Optional[str] = typer.Option(None, "--prefix", "-p", help="Collection prefix"),
     force_tree: bool = typer.Option(False, "--force-tree", help="Force rebuild tree"),
     reset_indexes: bool = typer.Option(False, "--reset-indexes", help="Reset indexes"),
@@ -255,8 +249,6 @@ def pipeline_command(
         
         typer.secho("\n" + "="*60 + "\n", fg=typer.colors.GREEN, bold=True)
         
-        raise typer.Exit(0)
-        
     except Exception as e:
         logger.error(f"Pipeline failed: {e}", exc_info=verbose)
         typer.secho(f"\n✗ Pipeline failed: {e}", fg=typer.colors.RED, err=True)
@@ -286,7 +278,7 @@ def list_command(
         else:
             if not collections:
                 typer.echo("No collections found.")
-                raise typer.Exit(0)
+                return
             
             typer.secho(f"\nFound {len(collections)} collection(s):\n", fg=typer.colors.CYAN, bold=True)
             
@@ -300,10 +292,53 @@ def list_command(
             
             typer.echo()
         
-        raise typer.Exit(0)
-        
     except Exception as e:
         typer.secho(f"✗ Error: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+
+
+# ===== Dashboard Command =====
+
+@app.command("dashboard")
+def dashboard_command(
+    port: int = typer.Option(8501, "--port", "-p", help="Dashboard port"),
+):
+    """
+    Launch the interactive query dashboard.
+    
+    Example:
+        exrag dashboard
+        exrag dashboard --port 8502
+    """
+    import subprocess
+    
+    try:
+        typer.secho("🚀 Starting Vector Query Dashboard...", fg=typer.colors.CYAN, bold=True)
+        typer.echo(f"📊 Dashboard will be available at: http://localhost:{port}")
+        typer.echo()
+        
+        cmd = [
+            sys.executable,
+            "-m",
+            "streamlit",
+            "run",
+            "embeddings/dashboard/app.py",
+            "--server.port",
+            str(port),
+            "--server.address",
+            "localhost"
+        ]
+        
+        subprocess.run(cmd, check=True)
+        
+    except KeyboardInterrupt:
+        typer.echo("\n👋 Dashboard stopped.")
+    except subprocess.CalledProcessError as e:
+        typer.secho(f"✗ Error running dashboard: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+    except Exception as e:
+        typer.secho(f"✗ Error: {e}", fg=typer.colors.RED, err=True)
+        typer.secho("💡 Tip: Make sure streamlit is installed: pip install streamlit", fg=typer.colors.YELLOW)
         raise typer.Exit(1)
 
 

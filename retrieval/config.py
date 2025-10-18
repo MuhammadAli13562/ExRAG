@@ -1,42 +1,47 @@
 """
 Configuration for agentic retrieval system.
+Uses centralized settings from common.settings.
 """
-import os
+import sys
 import logging
 from pathlib import Path
-from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv()
+# Add parent directory to path to import common
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from common.settings import get_settings
+
+# Get settings instance
+_settings = get_settings()
 
 # OpenAI configuration for agent LLM
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_API_KEY = _settings.openai_api_key
 if not OPENAI_API_KEY:
-    raise ValueError("OPENAI_API_KEY not found in environment variables")
+    raise ValueError("OPENAI_API_KEY not found in environment variables. Set it in .env file or as OPENAI_API_KEY or EXRAG_OPENAI_API_KEY environment variable.")
 
 # Agent LLM model
-AGENT_MODEL = "gpt-4o"  # Using GPT-4o for the agent
-TEMPERATURE = 0  # Deterministic for consistency
+AGENT_MODEL = _settings.agent_model
+TEMPERATURE = _settings.agent_temperature
 
 # ChromaDB configuration (reuse from embeddings)
-CHROMA_PERSIST_DIR = Path(__file__).parent.parent / "embeddings" / "chroma_db"
+CHROMA_PERSIST_DIR = _settings.chroma_db_dir
 
 # Retrieval configuration
-DEFAULT_TOP_K = 5  # Number of chunks to retrieve
-SIMILARITY_THRESHOLD = 0.5  # Minimum similarity score
+DEFAULT_TOP_K = _settings.retrieval_top_k
+SIMILARITY_THRESHOLD = _settings.retrieval_similarity_threshold
 
 # Exploration configuration
-MAX_EXPLORATION_DEPTH = 10  # Maximum nodes to explore in one direction
-DEFAULT_EXPLORATION_COUNT = 3  # Default number of nodes to explore
+MAX_EXPLORATION_DEPTH = _settings.max_exploration_depth
+DEFAULT_EXPLORATION_COUNT = _settings.default_exploration_count
 
 # Agent configuration
-MAX_ITERATIONS = 15  # Maximum number of agent iterations
-RECURSION_LIMIT = 25  # LangGraph recursion limit
+MAX_ITERATIONS = _settings.max_agent_iterations
+RECURSION_LIMIT = _settings.agent_recursion_limit
 
 # Logging configuration
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")  # DEBUG, INFO, WARNING, ERROR
+LOG_LEVEL = _settings.log_level
 LOG_FILE = Path(__file__).parent / "retrieval.log"
-LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+LOG_FORMAT = _settings.log_format
 
 # Configure logging
 def setup_logging():

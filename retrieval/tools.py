@@ -9,7 +9,7 @@ from openai import OpenAI
 import chromadb
 from chromadb.config import Settings
 
-from config import CHROMA_PERSIST_DIR, DEFAULT_TOP_K, DEFAULT_EXPLORATION_COUNT, MAX_EXPLORATION_DEPTH, OPENAI_API_KEY
+from .config import CHROMA_PERSIST_DIR, DEFAULT_TOP_K, DEFAULT_EXPLORATION_COUNT, MAX_EXPLORATION_DEPTH, OPENAI_API_KEY
 
 # Get logger
 logger = logging.getLogger("retrieval.tools")

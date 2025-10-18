@@ -7,6 +7,12 @@ from pathlib import Path
 from typing import Optional
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from functools import lru_cache
+from dotenv import load_dotenv
+
+# Load .env file from project root
+_env_path = Path(__file__).parent.parent / ".env"
+if _env_path.exists():
+    load_dotenv(_env_path)
 
 
 class Settings(BaseSettings):
@@ -51,9 +57,7 @@ class Settings(BaseSettings):
     default_collection_prefix: str = "exrag"
     
     model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
-        env_prefix="EXRAG_",
+        env_prefix="EXRAG_",  # Accept both EXRAG_* and standard env vars
         case_sensitive=False,
         extra="ignore",
     )

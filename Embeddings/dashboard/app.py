@@ -7,22 +7,22 @@ import sys
 from pathlib import Path
 
 # Add parent directory to path (for both direct run and streamlit run)
-parent_dir = Path(__file__).parent.parent
+parent_dir = Path(__file__).parent.parent.parent  # Go up to project root
 if str(parent_dir) not in sys.path:
     sys.path.insert(0, str(parent_dir))
 
 import streamlit as st
 
 try:
-    from indexer import VectorIndexer
-    from config import EMBEDDING_MODEL
-    from embedder import Embedder
-    from node_loader import get_cached_node_map, get_node_by_id
+    from embeddings.indexer import VectorIndexer
+    from embeddings.config import EMBEDDING_MODEL
+    from embeddings.embedder import Embedder
+    from embeddings.node_loader import get_cached_node_map, get_node_by_id
 except ImportError as e:
     st.error(f"❌ Import Error: {e}")
     st.error(f"Current working directory: {Path.cwd()}")
     st.error(f"Python path: {sys.path}")
-    st.error("Please run the dashboard using: ./run_dashboard.sh")
+    st.error("Please run the dashboard using: python -m streamlit run embeddings/dashboard/app.py")
     st.stop()
 
 # Page configuration

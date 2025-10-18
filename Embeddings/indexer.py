@@ -9,9 +9,9 @@ from tqdm import tqdm
 import chromadb
 from chromadb.config import Settings
 
-from config import CHROMA_PERSIST_DIR, BATCH_SIZE, EMBEDDING_DIMENSION, EMBEDDING_MODEL
-from metadata_extractor import extract_metadata, is_valid_node
-from embedder import Embedder
+from .config import CHROMA_PERSIST_DIR, BATCH_SIZE, EMBEDDING_DIMENSION, EMBEDDING_MODEL
+from .metadata_extractor import extract_metadata, is_valid_node
+from .embedder import Embedder
 
 
 def generate_collection_name(json_path: Path) -> str:
