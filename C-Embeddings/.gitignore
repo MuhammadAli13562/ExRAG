@@ -1,0 +1,15 @@
+# ChromaDB storage
+chroma_db/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Environment
+.env
+
+# Test outputs
+*.log
+
