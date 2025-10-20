@@ -26,6 +26,7 @@ def query_agent(
     text_collection: str,
     config: Optional[RetrievalConfig] = None,
     verbose: bool = False,
+    deep_log: bool = False,
 ) -> AgentResult:
     """
     Query the retrieval agent with a single question.
@@ -42,6 +43,7 @@ def query_agent(
         text_collection: Name of text-indexed collection
         config: Retrieval configuration (uses defaults if None)
         verbose: If True, print intermediate steps
+        deep_log: If True, log all tool inputs and outputs in detail
     
     Returns:
         AgentResult with answer and metadata
@@ -75,6 +77,7 @@ def query_agent(
             title_collection=title_collection,
             text_collection=text_collection,
             verbose=verbose,
+            deep_log=deep_log,
         )
         
         return AgentResult(

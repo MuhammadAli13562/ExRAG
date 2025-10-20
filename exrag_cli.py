@@ -133,6 +133,7 @@ def query_command(
     loop: bool = typer.Option(False, "--loop", "-l", help="Interactive loop mode"),
     json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
+    deep_log: bool = typer.Option(False, "--deep-log", help="Log all tool inputs and outputs in detail"),
 ):
     """
     Query the retrieval agent.
@@ -186,6 +187,7 @@ def query_command(
                         text_collection=text,
                         config=config,
                         verbose=verbose,
+                        deep_log=deep_log,
                     )
                     
                     if json_output:
@@ -228,6 +230,7 @@ def query_command(
             text_collection=text,
             config=config,
             verbose=verbose,
+            deep_log=deep_log,
         )
         
         if json_output:

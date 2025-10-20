@@ -20,6 +20,9 @@ logger = logging.getLogger(__name__)
 logger.info("Initializing retrieval tools for agent")
 retrieval_tools = RetrievalTools()
 
+# Global flag for deep logging (set by query_agent)
+_DEEP_LOG_ENABLED = False
+
 
 # Define tools using LangChain's @tool decorator
 @tool
@@ -38,9 +41,30 @@ def search_by_title(query: str, collection_name: str, top_k: int = 5) -> str:
     """
     import json
     logger.info(f"[TOOL] search_by_title called with query='{query[:50]}...', top_k={top_k}")
+    
+    if _DEEP_LOG_ENABLED:
+        logger.info("="*80)
+        logger.info("[DEEP LOG] search_by_title INPUT:")
+        logger.info(f"  query: {query}")
+        logger.info(f"  collection_name: {collection_name}")
+        logger.info(f"  top_k: {top_k}")
+        logger.info("="*80)
+    
     try:
         results = retrieval_tools.search_by_title(query, collection_name, top_k)
         logger.info(f"[TOOL] search_by_title returned {len(results)} results")
+        
+        if _DEEP_LOG_ENABLED:
+            logger.info("="*80)
+            logger.info(f"[DEEP LOG] search_by_title OUTPUT ({len(results)} results):")
+            for i, result in enumerate(results, 1):
+                logger.info(f"\n  Result {i}:")
+                logger.info(f"    node_id: {result.get('node_id', 'N/A')}")
+                logger.info(f"    title: {result.get('title', 'N/A')[:100]}...")
+                logger.info(f"    similarity: {result.get('similarity', 'N/A')}")
+                if 'metadata' in result:
+                    logger.info(f"    metadata: {result['metadata']}")
+            logger.info("="*80)
         
         # Add citation reminder to output
         output = {
@@ -69,9 +93,30 @@ def search_by_text(query: str, collection_name: str, top_k: int = 5) -> str:
     """
     import json
     logger.info(f"[TOOL] search_by_text called with query='{query[:50]}...', top_k={top_k}")
+    
+    if _DEEP_LOG_ENABLED:
+        logger.info("="*80)
+        logger.info("[DEEP LOG] search_by_text INPUT:")
+        logger.info(f"  query: {query}")
+        logger.info(f"  collection_name: {collection_name}")
+        logger.info(f"  top_k: {top_k}")
+        logger.info("="*80)
+    
     try:
         results = retrieval_tools.search_by_text(query, collection_name, top_k)
         logger.info(f"[TOOL] search_by_text returned {len(results)} results")
+        
+        if _DEEP_LOG_ENABLED:
+            logger.info("="*80)
+            logger.info(f"[DEEP LOG] search_by_text OUTPUT ({len(results)} results):")
+            for i, result in enumerate(results, 1):
+                logger.info(f"\n  Result {i}:")
+                logger.info(f"    node_id: {result.get('node_id', 'N/A')}")
+                logger.info(f"    text: {result.get('text', 'N/A')[:200]}...")
+                logger.info(f"    similarity: {result.get('similarity', 'N/A')}")
+                if 'metadata' in result:
+                    logger.info(f"    metadata: {result['metadata']}")
+            logger.info("="*80)
         
         # Add citation reminder to output
         output = {
@@ -101,9 +146,37 @@ def explore_nodes(node_id: str, collection_name: str, direction: str = "both", c
     """
     import json
     logger.info(f"[TOOL] explore_nodes called for node_id={node_id}, direction={direction}, count={count}")
+    
+    if _DEEP_LOG_ENABLED:
+        logger.info("="*80)
+        logger.info("[DEEP LOG] explore_nodes INPUT:")
+        logger.info(f"  node_id: {node_id}")
+        logger.info(f"  collection_name: {collection_name}")
+        logger.info(f"  direction: {direction}")
+        logger.info(f"  count: {count}")
+        logger.info("="*80)
+    
     try:
         results = retrieval_tools.explore_nodes(node_id, collection_name, direction, count)
         logger.info(f"[TOOL] explore_nodes returned context for node {node_id}")
+        
+        if _DEEP_LOG_ENABLED:
+            logger.info("="*80)
+            logger.info("[DEEP LOG] explore_nodes OUTPUT:")
+            if 'target_node' in results:
+                logger.info(f"\n  Target Node:")
+                logger.info(f"    node_id: {results['target_node'].get('node_id', 'N/A')}")
+                logger.info(f"    title: {results['target_node'].get('title', 'N/A')}")
+            if 'previous_nodes' in results:
+                logger.info(f"\n  Previous Nodes: {len(results['previous_nodes'])} nodes")
+                for node in results['previous_nodes']:
+                    logger.info(f"    - {node.get('node_id', 'N/A')}: {node.get('title', 'N/A')[:50]}...")
+            if 'next_nodes' in results:
+                logger.info(f"\n  Next Nodes: {len(results['next_nodes'])} nodes")
+                for node in results['next_nodes']:
+                    logger.info(f"    - {node.get('node_id', 'N/A')}: {node.get('title', 'N/A')[:50]}...")
+            logger.info("="*80)
+        
         return json.dumps(results, indent=2)
     except Exception as e:
         logger.error(f"[TOOL] explore_nodes failed: {e}", exc_info=True)
@@ -343,7 +416,8 @@ def query_agent(
     user_query: str,
     title_collection: str,
     text_collection: str,
-    verbose: bool = True
+    verbose: bool = True,
+    deep_log: bool = False
 ) -> Dict[str, Any]:
     """
     Query the retrieval agent.
@@ -353,14 +427,23 @@ def query_agent(
         title_collection: Name of the title-indexed collection
         text_collection: Name of the text-indexed collection
         verbose: Whether to print intermediate steps
+        deep_log: Whether to log all tool inputs and outputs in detail
     
     Returns:
         Dictionary containing the final answer and conversation history
     """
+    # Declare global at the start of function
+    global _DEEP_LOG_ENABLED
+    
+    # Set global deep log flag
+    _DEEP_LOG_ENABLED = deep_log
+    
     logger.info("="*80)
     logger.info(f"Starting agent query: '{user_query}'")
     logger.info(f"Title collection: {title_collection}")
     logger.info(f"Text collection: {text_collection}")
+    if deep_log:
+        logger.info("🔍 DEEP LOGGING ENABLED - All tool inputs/outputs will be logged")
     logger.info("="*80)
     
     # Create the agent
@@ -412,6 +495,9 @@ def query_agent(
             print(f"Iterations: {iteration_count}")
             print(f"{'='*80}\n")
         
+        # Reset deep log flag
+        _DEEP_LOG_ENABLED = False
+        
         return {
             "answer": final_answer,
             "messages": messages,
@@ -421,6 +507,10 @@ def query_agent(
     except Exception as e:
         error_msg = f"Error during agent execution: {str(e)}"
         logger.error(f"Agent execution failed: {e}", exc_info=True)
+        
+        # Reset deep log flag
+        _DEEP_LOG_ENABLED = False
+        
         if verbose:
             print(f"\nERROR: {error_msg}\n")
         return {
