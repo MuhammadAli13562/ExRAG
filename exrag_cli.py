@@ -126,28 +126,102 @@ def embed_command(
 
 @app.command("query")
 def query_command(
-    query: str = typer.Argument(..., help="Query string"),
+    query: Optional[str] = typer.Argument(None, help="Query string (omit for --loop mode)"),
     title: str = typer.Option(..., "--title", "-t", help="Title collection name"),
     text: str = typer.Option(..., "--text", "-x", help="Text collection name"),
     top_k: Optional[int] = typer.Option(None, "--top-k", "-k", help="Number of results"),
+    loop: bool = typer.Option(False, "--loop", "-l", help="Interactive loop mode"),
     json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
 ):
     """
     Query the retrieval agent.
     
-    Example:
+    Examples:
         exrag query "What are electric charges?" --title bio_titles --text bio_texts
+        exrag query --loop --title bio_titles --text bio_texts
     """
     from retrieval.pipeline import query_agent
     from common.models import RetrievalConfig
     
-    try:
-        settings = get_settings()
-        config = RetrievalConfig(
-            top_k=top_k or settings.retrieval_top_k,
-        )
+    settings = get_settings()
+    config = RetrievalConfig(
+        top_k=top_k or settings.retrieval_top_k,
+    )
+    
+    # Interactive loop mode
+    if loop:
+        typer.secho("\n" + "="*80, fg=typer.colors.GREEN, bold=True)
+        typer.secho("🔍 INTERACTIVE QUERY MODE", fg=typer.colors.GREEN, bold=True)
+        typer.secho("="*80, fg=typer.colors.GREEN, bold=True)
+        typer.echo(f"📚 Title Collection: {title}")
+        typer.echo(f"📄 Text Collection: {text}")
+        typer.echo(f"🔢 Top-K: {config.top_k}")
+        typer.secho("\nType your questions below. Type 'exit' or 'quit' to stop.", fg=typer.colors.YELLOW)
+        typer.secho("="*80 + "\n", fg=typer.colors.GREEN, bold=True)
         
+        question_count = 0
+        
+        while True:
+            try:
+                # Get query from user
+                user_query = typer.prompt("\n🔎 Your question", default="").strip()
+                
+                if not user_query:
+                    typer.secho("⚠️  Please enter a question.", fg=typer.colors.YELLOW)
+                    continue
+                
+                # Check for exit commands
+                if user_query.lower() in ['exit', 'quit', 'q', 'bye']:
+                    typer.secho(f"\n👋 Goodbye! Asked {question_count} question(s).", fg=typer.colors.GREEN)
+                    break
+                
+                question_count += 1
+                
+                # Execute query
+                try:
+                    result = query_agent(
+                        query=user_query,
+                        title_collection=title,
+                        text_collection=text,
+                        config=config,
+                        verbose=verbose,
+                    )
+                    
+                    if json_output:
+                        print(result.model_dump_json(indent=2))
+                    else:
+                        if not result.success:
+                            typer.secho(f"\n✗ Query failed: {result.error}", fg=typer.colors.RED, err=True)
+                            continue
+                        
+                        typer.secho("\n" + "="*80, fg=typer.colors.CYAN)
+                        typer.secho("💡 ANSWER", fg=typer.colors.CYAN, bold=True)
+                        typer.secho("="*80, fg=typer.colors.CYAN)
+                        typer.echo(result.answer)
+                        typer.secho("="*80, fg=typer.colors.CYAN)
+                
+                except Exception as e:
+                    logger.error(f"Query failed: {e}", exc_info=verbose)
+                    typer.secho(f"\n✗ Error: {e}", fg=typer.colors.RED, err=True)
+                    typer.secho("💡 Try another question or type 'exit' to quit.", fg=typer.colors.YELLOW)
+            
+            except KeyboardInterrupt:
+                typer.secho(f"\n\n👋 Interrupted! Asked {question_count} question(s).", fg=typer.colors.GREEN)
+                break
+            except EOFError:
+                typer.secho(f"\n\n👋 Session ended. Asked {question_count} question(s).", fg=typer.colors.GREEN)
+                break
+        
+        return
+    
+    # Single query mode
+    if not query:
+        typer.secho("✗ Error: Query is required in non-loop mode", fg=typer.colors.RED, err=True)
+        typer.secho("💡 Use --loop for interactive mode, or provide a query string", fg=typer.colors.YELLOW)
+        raise typer.Exit(1)
+    
+    try:
         result = query_agent(
             query=query,
             title_collection=title,
