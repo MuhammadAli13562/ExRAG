@@ -48,6 +48,7 @@ class RetrievalTools:
             logger.info("Initialized OpenAI embedder (text-embedding-3-small)")
             
             self._json_cache: Dict[str, List[Dict[str, Any]]] = {}
+            self._node_index_cache: Dict[str, Dict[str, int]] = {}
             logger.info("RetrievalTools initialized successfully")
         except Exception as e:
             logger.error(f"Failed to initialize ChromaDB client: {e}", exc_info=True)
@@ -107,6 +108,112 @@ class RetrievalTools:
         except Exception as e:
             logger.error(f"Failed to load JSON for collection {collection_name}: {e}", exc_info=True)
             raise RuntimeError(f"Failed to load JSON for collection {collection_name}: {e}")
+
+    def _get_node_index_map(self, collection_name: str) -> Dict[str, int]:
+        """Build or return a cached node_id -> index map for a collection's JSON."""
+        # Use resolved JSON path as stable key
+        collection = self.chroma_client.get_collection(collection_name)
+        json_path = collection.metadata.get("json_source")
+        if not json_path:
+            raise ValueError(f"No JSON source found in collection metadata for {collection_name}")
+        json_path_obj = Path(json_path)
+        if not json_path_obj.is_absolute():
+            project_root = Path(__file__).parent.parent
+            json_path_obj = project_root / json_path
+        cache_key = str(json_path_obj)
+
+        if cache_key in self._node_index_cache:
+            return self._node_index_cache[cache_key]
+
+        nodes = self._load_json_from_collection(collection_name)
+        index_map: Dict[str, int] = {}
+        for idx, node in enumerate(nodes):
+            nid = node.get("node_id")
+            if isinstance(nid, str) and nid:
+                index_map[nid] = idx
+
+        self._node_index_cache[cache_key] = index_map
+        return index_map
+
+    def get_node(self, node_id: str, collection_name: str) -> Dict[str, Any]:
+        """Return a single node by node_id from the collection's backing JSON."""
+        nodes = self._load_json_from_collection(collection_name)
+        index_map = self._get_node_index_map(collection_name)
+        if node_id not in index_map:
+            raise ValueError(f"Node {node_id} not found in JSON structure")
+        return nodes[index_map[node_id]]
+
+    def get_nodes(self, node_ids: List[str], collection_name: str) -> List[Dict[str, Any]]:
+        """Batch fetch nodes by node_id (preserving input order; missing nodes omitted)."""
+        nodes = self._load_json_from_collection(collection_name)
+        index_map = self._get_node_index_map(collection_name)
+        out: List[Dict[str, Any]] = []
+        for node_id in node_ids:
+            idx = index_map.get(node_id)
+            if idx is not None:
+                out.append(nodes[idx])
+        return out
+
+    def expand_around(
+        self,
+        node_id: str,
+        collection_name: str,
+        radius: int = DEFAULT_EXPLORATION_COUNT,
+    ) -> Dict[str, Any]:
+        """Expand around a node by radius above/below (alias on top of explore_nodes)."""
+        return self.explore_nodes(node_id=node_id, collection_name=collection_name, direction="both", count=radius)
+
+    def expand_many(
+        self,
+        seed_node_ids: List[str],
+        collection_name: str,
+        radius: int = DEFAULT_EXPLORATION_COUNT,
+        max_nodes: int = 50,
+    ) -> Dict[str, Any]:
+        """
+        Expand around multiple seed nodes, dedupe, and return a stitched evidence set.
+
+        Returns:
+            {
+              "seed_node_ids": [...],
+              "radius": int,
+              "nodes": [ {node_id,title,text,line_num,...}, ... ],
+              "node_ids": [ ... ],
+              "total_nodes": int
+            }
+        """
+        if max_nodes < 1:
+            raise ValueError("max_nodes must be >= 1")
+        if radius < 0 or radius > MAX_EXPLORATION_DEPTH:
+            raise ValueError(f"radius must be between 0 and {MAX_EXPLORATION_DEPTH}")
+
+        nodes = self._load_json_from_collection(collection_name)
+        index_map = self._get_node_index_map(collection_name)
+
+        indices = set()
+        for seed in seed_node_ids:
+            idx = index_map.get(seed)
+            if idx is None:
+                continue
+            lo = max(0, idx - radius)
+            hi = min(len(nodes) - 1, idx + radius)
+            for j in range(lo, hi + 1):
+                indices.add(j)
+
+        # Sort in document order (important for coherent context)
+        ordered = sorted(indices)
+        ordered = ordered[:max_nodes]
+        out_nodes = [nodes[i] for i in ordered]
+        out_ids = [n.get("node_id") for n in out_nodes if n.get("node_id")]
+
+        return {
+            "seed_node_ids": seed_node_ids,
+            "radius": radius,
+            "max_nodes": max_nodes,
+            "nodes": out_nodes,
+            "node_ids": out_ids,
+            "total_nodes": len(out_nodes),
+        }
     
     def search_by_title(
         self,

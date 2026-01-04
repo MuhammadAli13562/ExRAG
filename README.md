@@ -1,6 +1,6 @@
 # ExRAG
 
-**Hierarchical document indexing and agentic retrieval pipeline**
+## Hierarchical document indexing and agentic retrieval pipeline
 
 ExRAG converts markdown documents into searchable vector indexes with hierarchical structure preservation, enabling intelligent retrieval through a LangGraph-powered agent.
 
@@ -34,9 +34,39 @@ python exrag_cli.py query "What are electric charges?" \
 - **💾 Caching**: Content-based hashing to skip unchanged documents
 - **📝 Structured Logging**: Consistent logging across all components
 
+## 🔭 Observability (Langfuse, self-hosted)
+
+This repo supports optional tracing to a self-hosted Langfuse instance.
+
+### Start Langfuse locally (Docker Compose)
+
+- Update secrets marked with `# CHANGEME` in `docker-compose.yml`
+- Then run:
+
+```bash
+docker compose up -d
+```
+
+Open the UI at `http://localhost:3000`.
+
+### Send traces from ExRAG to Langfuse
+
+Set environment variables (or use `langfuse.env.example` as a starting point):
+
+```bash
+export EXRAG_TRACING=langfuse
+export LANGFUSE_BASE_URL=http://localhost:3000
+export LANGFUSE_PUBLIC_KEY=pk_...
+export LANGFUSE_SECRET_KEY=sk_...
+export LANGFUSE_PROJECT=ExRAG
+```
+
+Each question becomes one Langfuse trace with spans for:
+`planner`, `retrieve`, `expand`, `synthesize`, `validate` (plus tool/LLM events).
+
 ## 📁 Project Structure
 
-```
+```text
 ExRAG/
 ├── common/                    # Shared models, settings, logging
 │   ├── __init__.py
@@ -367,18 +397,22 @@ python -m retrieval eval test_queries.txt \
 ## 🐛 Troubleshooting
 
 ### "OPENAI_API_KEY not set"
+
 - Create `.env` file: `cp .env.example .env`
 - Set `OPENAI_API_KEY=your_key` in `.env`
 
 ### "Collection not found"
+
 - List collections: `python -m embeddings list`
 - Use exact collection names (case-sensitive)
 
 ### "No nodes found in JSON"
+
 - Verify tree JSON: `python md_to_tree.py print results/biology.json`
 - Check markdown has headers: `# ## ### ...`
 
 ### Rate limit errors
+
 - Reduce batch size: `--batch-size 50`
 - Adjust `PAGEINDEX_EMBEDDING_MAX_RETRIES` in `.env`
 
@@ -410,4 +444,3 @@ This pipeline is structured for modularity and extensibility:
 - **ChromaDB**: Vector database (embedded)
 - **Typer**: CLI framework (used throughout)
 - **Pydantic**: Data validation (used throughout)
-

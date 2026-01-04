@@ -107,7 +107,7 @@ class AgentResult(BaseModel):
     """Result from a single agent query."""
     query: str = Field(description="User query")
     answer: str = Field(description="Agent answer")
-    iteration_count: int = Field(ge=0, description="Number of agent iterations")
+    evidence_count: int = Field(ge=0, description="Number of evidence nodes collected")
     title_collection: str = Field(description="Title collection used")
     text_collection: str = Field(description="Text collection used")
     timestamp: datetime = Field(default_factory=datetime.now, description="Query timestamp")
@@ -120,7 +120,7 @@ class EvalMetrics(BaseModel):
     total_queries: int = Field(ge=0, description="Total queries evaluated")
     successful: int = Field(ge=0, description="Successful queries")
     failed: int = Field(ge=0, description="Failed queries")
-    avg_iteration_count: float = Field(ge=0.0, description="Average iterations per query")
+    avg_evidence_count: float = Field(ge=0.0, description="Average evidence nodes per query")
     avg_response_length: float = Field(ge=0.0, description="Average response length (chars)")
     timestamp: datetime = Field(default_factory=datetime.now, description="Eval timestamp")
     queries_path: Optional[Path] = Field(default=None, description="Source queries file")

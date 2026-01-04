@@ -81,7 +81,7 @@ def cli_query(
             typer.secho("="*80, fg=typer.colors.CYAN)
             typer.echo(result.answer)
             typer.secho("="*80, fg=typer.colors.CYAN)
-            typer.echo(f"\nIterations: {result.iteration_count}")
+            typer.echo(f"\nEvidence nodes: {result.evidence_count}")
             typer.echo(f"Title collection: {result.title_collection}")
             typer.echo(f"Text collection: {result.text_collection}\n")
         
@@ -221,7 +221,7 @@ def cli_eval(
             typer.echo(f"Successful: {metrics.successful}")
             typer.echo(f"Failed: {metrics.failed}")
             typer.echo(f"Success rate: {metrics.success_rate:.1%}")
-            typer.echo(f"Avg iterations: {metrics.avg_iteration_count:.1f}")
+            typer.echo(f"Avg evidence nodes: {metrics.avg_evidence_count:.1f}")
             typer.echo(f"Avg response length: {metrics.avg_response_length:.0f} chars")
             
             if save_results:
