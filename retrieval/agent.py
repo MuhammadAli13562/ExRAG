@@ -519,7 +519,12 @@ def create_agent(title_collection: str, text_collection: str):
             resp = llm.invoke([sys, HumanMessage(content=user_query)])
             dt = int((time.time() - t0) * 1000)
             raw = resp.content if isinstance(resp, AIMessage) else str(resp)
-            tracer.event("llm.planner", {"duration_ms": dt, "messages": [sys.content, user_query], "response": raw})
+            tracer.event(
+                "llm.planner",
+                input={"messages": [sys.content, user_query]},
+                output={"response": raw},
+                metadata={"duration_ms": dt, "model": AGENT_MODEL},
+            )
         plan: Dict[str, Any]
         try:
             plan = json.loads(raw)
@@ -581,11 +586,15 @@ def create_agent(title_collection: str, text_collection: str):
                 results = retrieval_tools.search_by_text(query, text_collection, top_k=top_k)
                 dt = int((time.time() - t0) * 1000)
 
-                tracer.event("retrieve_seeds.subquery", {
-                    "duration_ms": dt,
-                    "query": query[:100],
-                    "num_results": len(results),
-                })
+                tracer.event(
+                    "retrieve_seeds.subquery",
+                    input={"query": query, "top_k": top_k, "collection": text_collection},
+                    output={
+                        "num_results": len(results),
+                        "node_ids": [r.get("node_id") for r in results[:50]],
+                    },
+                    metadata={"duration_ms": dt},
+                )
 
                 for r in results:
                     node_id = r.get("node_id")
@@ -601,11 +610,14 @@ def create_agent(title_collection: str, text_collection: str):
 
             logger.info(f"[RETRIEVE] Got {len(all_candidates)} unique candidates, selected {len(seeds)} seeds")
 
-            tracer.event("retrieve_seeds.results", {
-                "total_unique": len(all_candidates),
-                "selected_seeds": len(seeds),
-                "seed_ids": [s.get("node_id") for s in seeds],
-            })
+            tracer.event(
+                "retrieve_seeds.results",
+                output={
+                    "total_unique": len(all_candidates),
+                    "selected_seeds": len(seeds),
+                    "seed_ids": [s.get("node_id") for s in seeds],
+                },
+            )
 
             out = {
                 "pending_seeds": seeds,
@@ -635,6 +647,12 @@ def create_agent(title_collection: str, text_collection: str):
         evidence_pool = list(state.get("evidence_pool") or [])
         evidence_ids = {e.get("node_id") for e in evidence_pool}
 
+        # Track seed order (first seed = 0, second = 1, etc.)
+        # Calculate from how many seeds we've already processed
+        plan = state.get("plan") or {}
+        max_seeds = int(plan.get("max_seeds") or 5)
+        seed_order = max_seeds - len(seeds)  # 0 for first, 1 for second, etc.
+
         seed_id = current_seed.get("node_id", "unknown")
         logger.info(f"[PROCESS_SEED] Processing seed {seed_id}, {len(remaining_seeds)} remaining")
 
@@ -644,11 +662,12 @@ def create_agent(title_collection: str, text_collection: str):
             seed_grade = grade_single_node(current_seed, state["user_query"], llm)
             dt = int((time.time() - t0) * 1000)
 
-            tracer.event("process_seed.grade", {
-                "seed_id": seed_id,
-                "grade": seed_grade,
-                "duration_ms": dt,
-            })
+            tracer.event(
+                "process_seed.grade",
+                input={"seed_id": seed_id},
+                output={"grade": seed_grade},
+                metadata={"duration_ms": dt},
+            )
 
             logger.info(f"[PROCESS_SEED] Seed {seed_id} graded as: {seed_grade}")
 
@@ -677,7 +696,10 @@ def create_agent(title_collection: str, text_collection: str):
                     collection_name=text_collection,
                     radius=radius
                 )
-                all_expanded_nodes = expanded.get("nodes", [])
+                # expand_around returns {"target_node": {...}, "nodes_above": [...], "nodes_below": [...]}
+                nodes_above = expanded.get("nodes_above", [])
+                nodes_below = expanded.get("nodes_below", [])
+                all_expanded_nodes = nodes_above + nodes_below
                 # Filter out visited nodes and the seed itself
                 neighbors = [n for n in all_expanded_nodes
                              if n.get("node_id") not in visited
@@ -696,31 +718,41 @@ def create_agent(title_collection: str, text_collection: str):
                 graded_neighbors = grade_neighbors_batch(neighbors, state["user_query"], llm)
                 dt = int((time.time() - t0) * 1000)
 
-                tracer.event("process_seed.grade_neighbors", {
-                    "seed_id": seed_id,
-                    "num_neighbors": len(neighbors),
-                    "duration_ms": dt,
-                })
+                tracer.event(
+                    "process_seed.grade_neighbors",
+                    input={"seed_id": seed_id, "num_neighbors": len(neighbors)},
+                    output={
+                        "relevant_count": len([n for n in graded_neighbors if n.get("relevance_grade") in ("high", "medium")]),
+                        "graded_count": len(graded_neighbors),
+                    },
+                    metadata={"duration_ms": dt},
+                )
 
             # Filter to relevant neighbors only
             relevant_neighbors = [n for n in graded_neighbors if n.get("relevance_grade") in ("high", "medium")]
 
-            # 4. Accumulate evidence
-            # Add seed with its grade
-            seed_with_grade = {**current_seed, "relevance_grade": seed_grade}
+            # 4. Accumulate evidence with seed_order for ranking
+            # Add seed with its grade and seed_order
+            seed_with_grade = {
+                **current_seed,
+                "relevance_grade": seed_grade,
+                "seed_order": seed_order,
+            }
             if seed_id not in evidence_ids:
                 evidence_pool.append(seed_with_grade)
 
-            # Add relevant neighbors (avoid duplicates)
+            # Add relevant neighbors with seed_order (avoid duplicates)
             for n in relevant_neighbors:
                 nid = n.get("node_id")
                 if nid and nid not in evidence_ids:
-                    evidence_pool.append(n)
+                    evidence_pool.append({**n, "seed_order": seed_order})
                     evidence_ids.add(nid)
 
-            # Sort evidence pool: high first, then by similarity
+            # Sort evidence pool: high first, then by seed_order, then by similarity
+            # This prioritizes nodes from earlier (higher-similarity) seeds
             evidence_pool.sort(key=lambda x: (
                 0 if x.get("relevance_grade") == "high" else 1,
+                x.get("seed_order", 999),  # Earlier seeds rank higher
                 -(x.get("similarity_score") or 0)
             ))
 
@@ -729,13 +761,16 @@ def create_agent(title_collection: str, text_collection: str):
 
             logger.info(f"[PROCESS_SEED] Seed {seed_id}: added {1 + len(relevant_neighbors)} to evidence (total: {len(evidence_pool)})")
 
-            tracer.event("process_seed.summary", {
-                "seed_id": seed_id,
-                "seed_grade": seed_grade,
-                "neighbors_expanded": len(neighbors),
-                "neighbors_relevant": len(relevant_neighbors),
-                "total_evidence": len(evidence_pool),
-            })
+            tracer.event(
+                "process_seed.summary",
+                input={"seed_id": seed_id},
+                output={
+                    "seed_grade": seed_grade,
+                    "neighbors_expanded": len(neighbors),
+                    "neighbors_relevant": len(relevant_neighbors),
+                    "total_evidence": len(evidence_pool),
+                },
+            )
 
             out = {
                 "pending_seeds": remaining_seeds,
@@ -763,13 +798,22 @@ def create_agent(title_collection: str, text_collection: str):
     def synthesize_answer(state: AgentState) -> Dict[str, Any]:
         """Synthesize final answer from accumulated evidence pool with citations."""
         user_query = state["user_query"]
-        # Use evidence_pool (accumulated and ranked across all iterations)
+        # Use evidence_pool (already sorted by grade → seed_order → similarity)
         evidence_pool = state.get("evidence_pool") or []
-        # Take top evidence nodes (already sorted by grade + similarity)
-        max_evidence = state.get("plan", {}).get("max_evidence_nodes", 30)
-        evidence_nodes = evidence_pool[:max_evidence]
 
-        logger.info(f"[STAGE] synthesize: using {len(evidence_nodes)} evidence nodes (from pool of {len(evidence_pool)})")
+        # Take top evidence nodes - limit to 10-12 to reduce noise
+        # Prioritize high-grade nodes, limit medium-grade
+        high_nodes = [n for n in evidence_pool if n.get("relevance_grade") == "high"]
+        medium_nodes = [n for n in evidence_pool if n.get("relevance_grade") == "medium"]
+
+        # Take all high-grade (up to 8) + top medium-grade (up to 4)
+        max_high = 8
+        max_medium = 4
+        evidence_nodes = high_nodes[:max_high] + medium_nodes[:max_medium]
+
+        logger.info(f"[STAGE] synthesize: using {len(evidence_nodes)} evidence nodes "
+                    f"({len(high_nodes[:max_high])} high + {len(medium_nodes[:max_medium])} medium, "
+                    f"from pool of {len(evidence_pool)})")
 
         with tracer.span("synthesize", input={"num_evidence": len(evidence_nodes)}) as span:
             evidence_lines: List[str] = []
@@ -800,11 +844,11 @@ def create_agent(title_collection: str, text_collection: str):
             answer = resp.content if isinstance(resp, AIMessage) else str(resp)
             tracer.event(
                 "llm.synthesize",
-                {
+                input={"prompt": human.content},
+                output={"response": answer},
+                metadata={
                     "duration_ms": dt,
-                    # Deep: store the full prompt (bounded by EXRAG_LANGFUSE_MAX_CHARS in tracer)
-                    "prompt": human.content,
-                    "response": answer,
+                    "model": AGENT_MODEL,
                     "evidence_node_ids": [n.get("node_id") for n in evidence_nodes[:50]],
                     "evidence_preview": _node_preview(evidence_nodes, max_nodes=10, text_chars=250),
                 },
@@ -861,10 +905,14 @@ def create_agent(title_collection: str, text_collection: str):
 
         logger.info(f"[VALIDATE] ok={ok}, missing={len(missing_citation)}, invalid={len(invalid_ids)}")
 
-        tracer.event("validate_citations", {
-            "validation": validation,
-            "missing_citation_examples": missing_citation[:3],
-        })
+        tracer.event(
+            "validate_citations",
+            input={"answer_length": len(answer), "num_evidence": len(evidence_pool)},
+            output={
+                "validation": validation,
+                "missing_citation_examples": missing_citation[:3],
+            },
+        )
 
         return {
             "validation": {**(state.get("validation") or {}), **validation},
