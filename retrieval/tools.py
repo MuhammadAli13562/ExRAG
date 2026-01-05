@@ -281,7 +281,95 @@ class RetrievalTools:
             if span is not None:
                 span.update(output={"total_nodes": len(out_nodes), "node_ids_preview": out_ids[:50]})
             return out
-    
+
+    def explore_titles(
+        self,
+        node_id: str,
+        collection_name: str,
+        radius: int = 10,
+        direction: Literal["up", "down", "both"] = "both"
+    ) -> List[Dict[str, str]]:
+        """
+        Get titles of nodes around a target node (cheap exploration - no full text).
+
+        This is used for structural navigation to quickly scan document structure
+        without fetching full content.
+
+        Args:
+            node_id: Center node to explore around
+            collection_name: Name of the collection
+            radius: How many nodes in each direction (default: 10)
+            direction: "up" (earlier in doc), "down" (later), or "both"
+
+        Returns:
+            List of {node_id, title, position} sorted by document order
+            position: "above", "target", "below"
+        """
+        from .langfuse_tracing import get_tracer
+
+        tracer = get_tracer()
+        with tracer.span(
+            "tool.explore_titles",
+            input={"node_id": node_id, "collection_name": collection_name, "radius": radius, "direction": direction},
+        ) as span:
+            logger.info(f"Exploring titles: node_id={node_id}, radius={radius}, direction={direction}")
+            try:
+                # Load JSON and get node positions
+                nodes = self._load_json_from_collection(collection_name)
+                index_map = self._get_node_index_map(collection_name)
+
+                if node_id not in index_map:
+                    raise ValueError(f"Node {node_id} not found")
+
+                target_idx = index_map[node_id]
+                titles: List[Dict[str, str]] = []
+
+                # Get nodes above
+                if direction in ("up", "both"):
+                    start_idx = max(0, target_idx - radius)
+                    for idx in range(start_idx, target_idx):
+                        n = nodes[idx]
+                        titles.append({
+                            "node_id": n.get("node_id", ""),
+                            "title": n.get("title", ""),
+                            "position": "above"
+                        })
+
+                # Add target node
+                target_node = nodes[target_idx]
+                titles.append({
+                    "node_id": target_node.get("node_id", ""),
+                    "title": target_node.get("title", ""),
+                    "position": "target"
+                })
+
+                # Get nodes below
+                if direction in ("down", "both"):
+                    end_idx = min(len(nodes), target_idx + radius + 1)
+                    for idx in range(target_idx + 1, end_idx):
+                        n = nodes[idx]
+                        titles.append({
+                            "node_id": n.get("node_id", ""),
+                            "title": n.get("title", ""),
+                            "position": "below"
+                        })
+
+                logger.info(f"Explore titles returned {len(titles)} entries")
+                if span is not None:
+                    span.update(
+                        output={
+                            "num_titles": len(titles),
+                            "titles_preview": [t.get("title", "")[:50] for t in titles[:10]],
+                        }
+                    )
+                return titles
+
+            except Exception as e:
+                logger.error(f"Explore titles failed: {e}", exc_info=True)
+                if span is not None:
+                    span.update(output={"error": str(e)})
+                raise RuntimeError(f"Explore titles failed: {e}")
+
     def search_by_title(
         self,
         query: str,
