@@ -1,7 +1,7 @@
 """
 LangGraph-based agentic retrieval system.
 """
-from typing import TypedDict, Annotated, List, Dict, Any
+from typing import TypedDict, Annotated, List, Dict, Any, Optional
 import operator
 import json
 import re
@@ -319,36 +319,100 @@ class AgentState(TypedDict):
     processing_complete: bool                 # True when all seeds processed
 
 
-# Navigation system prompt for structural queries
-NAVIGATION_SYSTEM_PROMPT = """You are a document navigation agent. Your job is to find specific sections WITHIN a specific chapter by exploring document structure.
+# =========================================================================
+# Navigator Sub-graph State and Constants
+# =========================================================================
 
-CRITICAL RULES:
-1. ALWAYS find the CHAPTER landmark FIRST (e.g., "Chapter 4")
-2. NEVER search directly for section titles like "Review Questions" - they exist in EVERY chapter!
-3. Navigate FROM the chapter landmark to find sections WITHIN that chapter
-4. Sections belong to a chapter if they appear AFTER the chapter header and BEFORE the next chapter
+# Scope levels for navigator retry mechanism
+SCOPE_PARAMS = {
+    0: {"radius": 10, "top_k": 5, "name": "narrow"},    # Initial focused search
+    1: {"radius": 15, "top_k": 8, "name": "medium"},    # After first failure
+    2: {"radius": 25, "top_k": 12, "name": "broad"},    # Maximum expansion
+}
 
-You have these tools:
-1. nav_search_title(query) - Search for chapter headers. Use ONLY for finding chapter landmarks.
-2. nav_explore_titles(node_id, direction, radius) - See titles around a node
-   - direction: "up" (earlier in doc), "down" (later), "both"
-   - radius: how many nodes to explore (default 10)
-3. nav_peek_content(node_id) - Read a node's content to verify it belongs to the right chapter
-4. nav_mark_found(node_ids) - Call when you've found the correct section in the correct chapter
+MAX_SCOPE_LEVEL = 2
+NAVIGATOR_MAX_ITERATIONS = 8  # Per scope level
 
-CORRECT STRATEGY for "Review Questions at end of Chapter 4":
-1. Search: nav_search_title("Chapter 4") → find Chapter 4 header (e.g., node 0200)
-2. Explore DOWN: nav_explore_titles("0200", direction="down", radius=15)
-3. Look for "Review Questions" in the results that comes AFTER Chapter 4 but BEFORE Chapter 5
-4. If not visible, explore further DOWN from the last node you saw
-5. When found, verify it's before "Chapter 5" header, then call nav_mark_found()
 
-WRONG STRATEGY (DO NOT DO THIS):
-- Searching nav_search_title("Review Questions") - this finds ALL review questions from ALL chapters!
-- Picking the first "Review Questions" you see without checking the chapter
+class NavigatorState(TypedDict):
+    """State for the navigator sub-graph."""
+    # Input from parent (set by parse_goal)
+    goal: str                                  # Natural language goal
+    chapter: Optional[int]                     # Target chapter number (if specified)
+    position: Optional[str]                    # "end", "beginning", or None
+    section_keywords: List[str]                # Keywords to look for
 
-The nav_status in tool results shows your position - use it to stay oriented!
-"""
+    # Navigation tracking
+    landmark_node_id: Optional[str]            # Chapter/section landmark found
+    current_position: str                      # Current node being explored around
+    explored_centers: List[str]                # Nodes explored (prevent re-exploration)
+    seen_nodes: Dict[str, str]                 # node_id -> title mapping
+
+    # Results
+    candidate_nodes: List[Dict[str, Any]]      # Potential matches found
+    found_nodes: List[str]                     # Confirmed found node IDs
+
+    # Control flow
+    messages: Annotated[List[BaseMessage], operator.add]  # Conversation history
+    iteration: int                             # Current iteration count
+    max_iterations: int                        # Max allowed per scope (default 8)
+    scope_level: int                           # 0=narrow, 1=medium, 2=broad
+    status: str                                # searching|verifying|found|failed|retry
+    last_action: str                           # Description of last action taken
+    reflection: str                            # Agent's reflection on progress
+
+    # Output (for returning to parent graph)
+    structural_seeds: List[Dict[str, Any]]     # Final output nodes
+
+
+# Goal-oriented navigation prompt (replaces prescriptive prompt)
+NAVIGATOR_GOAL_PROMPT = """You are a document navigator. Your goal is to find specific sections within a document's structure.
+
+YOUR GOAL: {goal}
+
+TOOLS AVAILABLE:
+- nav_search_title(query, top_k): Semantic search on section titles. Returns nodes with similarity scores.
+- nav_explore_titles(node_id, direction, radius): See titles around a node.
+  - direction: "up" (earlier in doc), "down" (later), "both"
+  - radius: how many nodes to explore (default based on scope)
+- nav_peek_content(node_id): Read a node's content preview to verify it matches.
+- nav_mark_found(node_ids): Mark nodes as found when you've located the target sections.
+
+CURRENT STATE:
+- Landmark: {landmark}
+- Current position: {current_position}
+- Explored {num_explored} centers, seen {num_seen} nodes
+- Scope: {scope_name} (radius={radius}, top_k={top_k})
+- Iteration: {iteration}/{max_iterations}
+
+KEY INSIGHTS:
+- For chapter-specific content: Find the chapter landmark first, then explore from there.
+- Sections like "Review Questions" or "Summary" exist in EVERY chapter - verify you're in the right one.
+- Position hints: "end of chapter" = explore DOWN from chapter header, "beginning" = explore UP.
+- If not making progress, try exploring from edge nodes you've already seen.
+- When confident you've found the target, call nav_mark_found() with the node IDs.
+
+Think about your goal and current state. What action will make progress toward finding the target?"""
+
+
+# Reflection prompt for navigator
+NAVIGATOR_REFLECTION_PROMPT = """Reflect on your navigation progress.
+
+GOAL: {goal}
+ITERATION: {iteration}/{max_iterations}
+SCOPE: {scope_name}
+LANDMARK: {landmark}
+CURRENT POSITION: {current_position}
+EXPLORED CENTERS: {num_explored}
+CANDIDATES FOUND: {num_candidates}
+LAST ACTION: {last_action}
+
+Evaluate your progress:
+1. Are you making progress toward the goal? (yes/no/uncertain)
+2. What should happen next? (continue/verify/expand_scope/give_up)
+3. Brief reason (one sentence)
+
+Answer in format: progress|action|reason"""
 
 
 def grade_single_node(node: Dict[str, Any], query: str, llm) -> str:
@@ -534,6 +598,582 @@ REMEMBER: When tools return results, they include node_id. Use those node_ids in
 """
 
 
+# =========================================================================
+# Navigator Sub-graph Implementation
+# =========================================================================
+
+def create_navigator_subgraph(
+    llm: ChatOpenAI,
+    retrieval_tools_instance: RetrievalTools,
+    title_collection: str,
+    text_collection: str,
+    tracer
+):
+    """
+    Create the navigator sub-graph for structural document navigation.
+
+    Args:
+        llm: The LLM instance to use
+        retrieval_tools_instance: RetrievalTools instance for document access
+        title_collection: Name of the title-indexed collection
+        text_collection: Name of the text-indexed collection
+        tracer: Langfuse tracer for observability
+
+    Returns:
+        Compiled LangGraph sub-graph for navigation
+    """
+    from langchain_core.tools import StructuredTool
+    from langchain_core.messages import ToolMessage
+    from pydantic import BaseModel, Field as PydanticField
+
+    # -------------------------------------------------------------------------
+    # Navigation Tool Definitions (closures over collections)
+    # -------------------------------------------------------------------------
+
+    class NavSearchTitleInput(BaseModel):
+        query: str = PydanticField(description="Search query for title, e.g. 'Chapter 4'")
+        top_k: int = PydanticField(default=5, description="Number of results")
+
+    class NavExploreTitlesInput(BaseModel):
+        node_id: str = PydanticField(description="Center node ID to explore around")
+        direction: str = PydanticField(default="both", description="Direction: 'up', 'down', or 'both'")
+        radius: int = PydanticField(default=10, description="How many nodes in each direction")
+
+    class NavPeekContentInput(BaseModel):
+        node_id: str = PydanticField(description="Node ID to peek at")
+
+    class NavMarkFoundInput(BaseModel):
+        node_ids: List[str] = PydanticField(description="List of node IDs that match the user's request")
+
+    def nav_search_title(query: str, top_k: int = 5) -> str:
+        """Search for sections by title (semantic search on headings)."""
+        logger.info(f"[NAV] nav_search_title: query='{query}', top_k={top_k}")
+        try:
+            results = retrieval_tools_instance.search_by_title(query, title_collection, top_k)
+            simplified = [
+                {
+                    "node_id": r.get("node_id"),
+                    "title": r.get("title"),
+                    "similarity_score": round(r.get("similarity_score", 0), 3)
+                }
+                for r in results
+            ]
+            return json.dumps(simplified, indent=2)
+        except Exception as e:
+            logger.error(f"[NAV] nav_search_title failed: {e}")
+            return json.dumps({"error": str(e)})
+
+    def nav_explore_titles(node_id: str, direction: str = "both", radius: int = 10) -> str:
+        """Get section titles around a node to understand document structure."""
+        logger.info(f"[NAV] nav_explore_titles: node_id={node_id}, direction={direction}, radius={radius}")
+        try:
+            titles = retrieval_tools_instance.explore_titles(node_id, text_collection, radius, direction)
+            return json.dumps(titles, indent=2)
+        except Exception as e:
+            logger.error(f"[NAV] nav_explore_titles failed: {e}")
+            return json.dumps({"error": str(e)})
+
+    def nav_peek_content(node_id: str) -> str:
+        """Get the full content of a specific node to verify it matches."""
+        logger.info(f"[NAV] nav_peek_content: node_id={node_id}")
+        try:
+            node = retrieval_tools_instance.get_node(node_id, text_collection)
+            if node:
+                return json.dumps({
+                    "node_id": node.get("node_id"),
+                    "title": node.get("title"),
+                    "text_preview": (node.get("text") or "")[:500]
+                }, indent=2)
+            return json.dumps({"error": f"Node {node_id} not found"})
+        except Exception as e:
+            logger.error(f"[NAV] nav_peek_content failed: {e}")
+            return json.dumps({"error": str(e)})
+
+    def nav_mark_found(node_ids: List[str]) -> str:
+        """Mark nodes as the target. Call when you've found what you're looking for."""
+        logger.info(f"[NAV] nav_mark_found: {node_ids}")
+        return json.dumps({"status": "found", "node_ids": node_ids})
+
+    nav_tools = [
+        StructuredTool.from_function(
+            func=nav_search_title,
+            name="nav_search_title",
+            description="Search for sections by title to find chapter landmarks or section headers",
+            args_schema=NavSearchTitleInput
+        ),
+        StructuredTool.from_function(
+            func=nav_explore_titles,
+            name="nav_explore_titles",
+            description="Get section titles around a node to understand document structure",
+            args_schema=NavExploreTitlesInput
+        ),
+        StructuredTool.from_function(
+            func=nav_peek_content,
+            name="nav_peek_content",
+            description="Get a node's content preview to verify it matches (use sparingly)",
+            args_schema=NavPeekContentInput
+        ),
+        StructuredTool.from_function(
+            func=nav_mark_found,
+            name="nav_mark_found",
+            description="Mark nodes as found. Call when you've located the target sections.",
+            args_schema=NavMarkFoundInput
+        ),
+    ]
+
+    # Bind tools to LLM
+    nav_llm = llm.bind_tools(nav_tools)
+
+    # -------------------------------------------------------------------------
+    # Navigator Node Functions
+    # -------------------------------------------------------------------------
+
+    def parse_goal(state: NavigatorState) -> Dict[str, Any]:
+        """
+        Entry node: Parse structural hints into a natural language goal.
+        Initialize navigation state.
+        """
+        chapter = state.get("chapter")
+        position = state.get("position")
+        keywords = state.get("section_keywords") or []
+
+        # Build natural language goal
+        goal_parts = []
+        if keywords:
+            goal_parts.append(f"Find the '{' '.join(keywords)}' section")
+        if chapter is not None:
+            goal_parts.append(f"in Chapter {chapter}")
+        if position == "end":
+            goal_parts.append("near the end of the chapter")
+        elif position == "beginning":
+            goal_parts.append("near the beginning of the chapter")
+
+        goal = " ".join(goal_parts) if goal_parts else "Find relevant structural sections"
+
+        logger.info(f"[NAVIGATOR] parse_goal: {goal}")
+
+        return {
+            "goal": goal,
+            "iteration": 0,
+            "max_iterations": NAVIGATOR_MAX_ITERATIONS,
+            "scope_level": 0,
+            "status": "searching",
+            "explored_centers": [],
+            "seen_nodes": {},
+            "candidate_nodes": [],
+            "found_nodes": [],
+            "landmark_node_id": None,
+            "current_position": "",
+            "last_action": "initialized",
+            "reflection": "",
+            "structural_seeds": [],
+        }
+
+    def execute_tools(state: NavigatorState) -> Dict[str, Any]:
+        """
+        Execute navigation tools based on LLM decisions.
+        """
+        scope = SCOPE_PARAMS.get(state.get("scope_level", 0), SCOPE_PARAMS[0])
+
+        # Build the prompt with current state
+        prompt = NAVIGATOR_GOAL_PROMPT.format(
+            goal=state.get("goal", ""),
+            landmark=state.get("landmark_node_id") or "Not found yet",
+            current_position=state.get("current_position") or "Starting",
+            num_explored=len(state.get("explored_centers", [])),
+            num_seen=len(state.get("seen_nodes", {})),
+            scope_name=scope["name"],
+            radius=scope["radius"],
+            top_k=scope["top_k"],
+            iteration=state.get("iteration", 0) + 1,
+            max_iterations=state.get("max_iterations", NAVIGATOR_MAX_ITERATIONS),
+        )
+
+        messages = list(state.get("messages", []))
+        messages.append(HumanMessage(content=prompt))
+
+        logger.info(f"[NAVIGATOR] execute_tools: iteration {state.get('iteration', 0) + 1}")
+
+        t0 = time.time()
+        response = nav_llm.invoke(messages)
+        dt = int((time.time() - t0) * 1000)
+
+        tracer.event(
+            "navigator.llm_call",
+            input={"iteration": state.get("iteration", 0) + 1},
+            output={"has_tool_calls": bool(response.tool_calls)},
+            metadata={"duration_ms": dt},
+        )
+
+        new_messages = [response]
+        updates: Dict[str, Any] = {}
+
+        # Track state changes
+        explored_centers = list(state.get("explored_centers", []))
+        seen_nodes = dict(state.get("seen_nodes", {}))
+        landmark_node_id = state.get("landmark_node_id")
+        current_position = state.get("current_position", "")
+        candidate_nodes = list(state.get("candidate_nodes", []))
+        action_descriptions = []
+
+        if not response.tool_calls:
+            # LLM didn't call any tools - might be stuck
+            logger.warning("[NAVIGATOR] No tool calls from LLM")
+            action_descriptions.append("No action taken")
+        else:
+            for tool_call in response.tool_calls:
+                tool_name = tool_call["name"]
+                tool_args = tool_call["args"]
+
+                logger.info(f"[NAVIGATOR] Tool call: {tool_name}({tool_args})")
+
+                # Execute tool
+                if tool_name == "nav_search_title":
+                    result = nav_search_title(**tool_args)
+                    action_descriptions.append(f"Searched titles for '{tool_args.get('query', '')}'")
+
+                    # Track results
+                    try:
+                        data = json.loads(result)
+                        if isinstance(data, list) and data:
+                            # First result becomes landmark if not set
+                            if not landmark_node_id:
+                                landmark_node_id = data[0].get("node_id")
+                                current_position = landmark_node_id
+                            for r in data:
+                                nid = r.get("node_id")
+                                if nid:
+                                    seen_nodes[nid] = r.get("title", "")
+                    except json.JSONDecodeError:
+                        pass
+
+                elif tool_name == "nav_explore_titles":
+                    center_node = tool_args.get("node_id", "")
+
+                    # Check re-exploration
+                    if center_node in explored_centers:
+                        result = json.dumps({
+                            "warning": f"Already explored around node {center_node}",
+                            "suggestion": "Try exploring from a different node at the edge of what you've seen."
+                        })
+                        action_descriptions.append(f"Blocked re-exploration of {center_node}")
+                    else:
+                        result = nav_explore_titles(**tool_args)
+                        explored_centers.append(center_node)
+                        current_position = center_node
+                        action_descriptions.append(f"Explored titles around {center_node}")
+
+                        # Track seen nodes
+                        try:
+                            data = json.loads(result)
+                            if isinstance(data, list):
+                                for t in data:
+                                    nid = t.get("node_id")
+                                    if nid:
+                                        seen_nodes[nid] = t.get("title", "")
+                        except json.JSONDecodeError:
+                            pass
+
+                elif tool_name == "nav_peek_content":
+                    result = nav_peek_content(**tool_args)
+                    action_descriptions.append(f"Peeked at content of {tool_args.get('node_id', '')}")
+
+                elif tool_name == "nav_mark_found":
+                    result = nav_mark_found(**tool_args)
+                    found_ids = tool_args.get("node_ids", [])
+                    action_descriptions.append(f"Marked found: {found_ids}")
+                    updates["found_nodes"] = found_ids
+                    updates["status"] = "verifying"
+
+                else:
+                    result = json.dumps({"error": f"Unknown tool: {tool_name}"})
+                    action_descriptions.append(f"Unknown tool: {tool_name}")
+
+                new_messages.append(ToolMessage(content=result, tool_call_id=tool_call["id"]))
+
+        return {
+            "messages": new_messages,
+            "iteration": state.get("iteration", 0) + 1,
+            "last_action": "; ".join(action_descriptions) if action_descriptions else "No action",
+            "explored_centers": explored_centers,
+            "seen_nodes": seen_nodes,
+            "landmark_node_id": landmark_node_id,
+            "current_position": current_position,
+            "candidate_nodes": candidate_nodes,
+            **updates
+        }
+
+    def reflect(state: NavigatorState) -> Dict[str, Any]:
+        """
+        Reflect on navigation progress and decide next action.
+        """
+        # CRITICAL: Preserve "found" status - don't override if verification already succeeded
+        current_status = state.get("status", "searching")
+        if current_status == "found":
+            logger.info("[NAVIGATOR] reflect: Status already 'found', preserving it")
+            return {
+                "reflection": "Verification succeeded - nodes found",
+                "status": "found",
+            }
+        
+        scope = SCOPE_PARAMS.get(state.get("scope_level", 0), SCOPE_PARAMS[0])
+
+        prompt = NAVIGATOR_REFLECTION_PROMPT.format(
+            goal=state.get("goal", ""),
+            iteration=state.get("iteration", 0),
+            max_iterations=state.get("max_iterations", NAVIGATOR_MAX_ITERATIONS),
+            scope_name=scope["name"],
+            landmark=state.get("landmark_node_id") or "Not found",
+            current_position=state.get("current_position") or "Starting",
+            num_explored=len(state.get("explored_centers", [])),
+            num_candidates=len(state.get("candidate_nodes", [])),
+            last_action=state.get("last_action", "None"),
+        )
+
+        t0 = time.time()
+        response = llm.invoke([
+            SystemMessage(content="You are reflecting on document navigation progress. Be concise."),
+            HumanMessage(content=prompt)
+        ])
+        dt = int((time.time() - t0) * 1000)
+
+        raw = response.content if hasattr(response, 'content') else str(response)
+
+        # Parse reflection: progress|action|reason
+        parts = raw.strip().split("|")
+        progress = parts[0].strip().lower() if len(parts) > 0 else "uncertain"
+        action = parts[1].strip().lower() if len(parts) > 1 else "continue"
+        reason = parts[2].strip() if len(parts) > 2 else ""
+
+        logger.info(f"[NAVIGATOR] reflect: progress={progress}, action={action}, reason={reason}")
+
+        tracer.event(
+            "navigator.reflect",
+            input={"iteration": state.get("iteration", 0)},
+            output={"progress": progress, "action": action, "reason": reason},
+            metadata={"duration_ms": dt},
+        )
+
+        # Determine new status based on reflection
+        # If we're already verifying (found nodes marked), stay in verifying
+        if current_status == "verifying":
+            new_status = "verifying"
+        elif action == "give_up":
+            # If we haven't exhausted scope levels, retry with broader scope
+            if state.get("scope_level", 0) < MAX_SCOPE_LEVEL:
+                new_status = "retry"
+            else:
+                new_status = "failed"
+        elif action == "expand_scope":
+            if state.get("scope_level", 0) < MAX_SCOPE_LEVEL:
+                new_status = "retry"
+            else:
+                new_status = "searching"  # Can't expand further, keep trying
+        elif action == "verify" and state.get("candidate_nodes"):
+            new_status = "verifying"
+        else:
+            new_status = "searching"
+
+        return {
+            "reflection": f"{progress}: {reason}",
+            "status": new_status,
+        }
+
+    def verify(state: NavigatorState) -> Dict[str, Any]:
+        """
+        Verify that found nodes actually match the goal.
+        """
+        found_nodes = state.get("found_nodes", [])
+        chapter = state.get("chapter")
+        keywords = state.get("section_keywords", [])
+
+        if not found_nodes:
+            logger.info("[NAVIGATOR] verify: No found nodes to verify")
+            return {"status": "searching"}
+
+        logger.info(f"[NAVIGATOR] verify: Checking {len(found_nodes)} nodes")
+
+        verified = []
+        for node_id in found_nodes[:5]:  # Limit verification to 5 nodes
+            try:
+                node = retrieval_tools_instance.get_node(node_id, text_collection)
+                if not node:
+                    continue
+
+                title = (node.get("title") or "").lower()
+                text = (node.get("text") or "").lower()
+
+                # Check if keywords match
+                keyword_match = any(kw.lower() in title or kw.lower() in text for kw in keywords) if keywords else True
+
+                # For now, trust that if keywords match, it's valid
+                # (More sophisticated chapter verification could be added)
+                if keyword_match:
+                    verified.append(node_id)
+                    logger.info(f"[NAVIGATOR] verify: Node {node_id} verified")
+                else:
+                    logger.info(f"[NAVIGATOR] verify: Node {node_id} rejected (keyword mismatch)")
+
+            except Exception as e:
+                logger.warning(f"[NAVIGATOR] verify: Error checking node {node_id}: {e}")
+
+        if verified:
+            return {
+                "found_nodes": verified,
+                "status": "found"
+            }
+        else:
+            # Verification failed - continue searching
+            return {
+                "found_nodes": [],
+                "status": "searching",
+                "reflection": "Candidates did not verify - continuing search"
+            }
+
+    def retry_broader(state: NavigatorState) -> Dict[str, Any]:
+        """
+        Expand search scope and retry navigation.
+        """
+        current_scope = state.get("scope_level", 0)
+        new_scope = min(current_scope + 1, MAX_SCOPE_LEVEL)
+
+        scope_params = SCOPE_PARAMS.get(new_scope, SCOPE_PARAMS[MAX_SCOPE_LEVEL])
+
+        logger.info(f"[NAVIGATOR] retry_broader: Expanding from scope {current_scope} to {new_scope} ({scope_params['name']})")
+
+        return {
+            "scope_level": new_scope,
+            "status": "searching",
+            "iteration": 0,  # Reset iteration count for new scope
+            "explored_centers": [],  # Clear explored centers for fresh exploration
+            "candidate_nodes": [],
+            "found_nodes": [],
+            "reflection": f"Expanding to {scope_params['name']} scope (radius={scope_params['radius']})",
+            "messages": [HumanMessage(content=f"Previous search at narrower scope didn't find the target. Now using {scope_params['name']} scope. Goal: {state.get('goal', '')}")],
+        }
+
+    def exit_success(state: NavigatorState) -> Dict[str, Any]:
+        """
+        Exit with found nodes - fetch full content and return as structural_seeds.
+        """
+        found_nodes = state.get("found_nodes", [])
+
+        logger.info(f"[NAVIGATOR] exit_success: Returning {len(found_nodes)} nodes")
+
+        structural_seeds = []
+        try:
+            nodes = retrieval_tools_instance.get_nodes(found_nodes, text_collection)
+            for i, node in enumerate(nodes):
+                structural_seeds.append({
+                    **node,
+                    "source": "structural",
+                    "similarity_score": 1.0 - (i * 0.01),  # Slightly decrease for ordering
+                    "relevance_grade": "high",
+                })
+        except Exception as e:
+            logger.error(f"[NAVIGATOR] exit_success: Failed to fetch nodes: {e}")
+
+        return {"structural_seeds": structural_seeds, "status": "found"}
+
+    def exit_failure(state: NavigatorState) -> Dict[str, Any]:
+        """
+        Exit after exhausting all options - return empty seeds.
+        """
+        logger.warning(
+            f"[NAVIGATOR] exit_failure: Failed to find target after scope={state.get('scope_level')}, "
+            f"iterations={state.get('iteration')}"
+        )
+        return {"structural_seeds": [], "status": "failed"}
+
+    # -------------------------------------------------------------------------
+    # Routing Function
+    # -------------------------------------------------------------------------
+
+    def route_navigator(state: NavigatorState) -> str:
+        """Route based on navigation status."""
+        status = state.get("status", "searching")
+        iteration = state.get("iteration", 0)
+        max_iter = state.get("max_iterations", NAVIGATOR_MAX_ITERATIONS)
+        scope_level = state.get("scope_level", 0)
+
+        logger.debug(f"[NAVIGATOR] route: status={status}, iter={iteration}/{max_iter}, scope={scope_level}")
+
+        if status == "found":
+            return "exit_success"
+
+        if status == "failed":
+            return "exit_failure"
+
+        if status == "retry":
+            return "retry_broader"
+
+        if status == "verifying":
+            return "verify"
+
+        # Still searching - check iteration limit
+        if iteration >= max_iter:
+            if scope_level < MAX_SCOPE_LEVEL:
+                return "retry_broader"
+            else:
+                return "exit_failure"
+
+        return "execute_tools"
+
+    # -------------------------------------------------------------------------
+    # Build Sub-graph
+    # -------------------------------------------------------------------------
+
+    navigator = StateGraph(NavigatorState)
+
+    # Add nodes
+    navigator.add_node("parse_goal", parse_goal)
+    navigator.add_node("execute_tools", execute_tools)
+    navigator.add_node("reflect", reflect)
+    navigator.add_node("verify", verify)
+    navigator.add_node("retry_broader", retry_broader)
+    navigator.add_node("exit_success", exit_success)
+    navigator.add_node("exit_failure", exit_failure)
+
+    # Entry point
+    navigator.set_entry_point("parse_goal")
+
+    # Fixed edges
+    navigator.add_edge("parse_goal", "execute_tools")
+    navigator.add_edge("execute_tools", "reflect")
+    # Verify routes conditionally based on status (success -> exit_success, failure -> reflect)
+    navigator.add_conditional_edges(
+        "verify",
+        route_navigator,
+        {
+            "exit_success": "exit_success",
+            "reflect": "reflect",
+            "execute_tools": "execute_tools",
+            "retry_broader": "retry_broader",
+            "exit_failure": "exit_failure",
+        }
+    )
+    navigator.add_edge("retry_broader", "execute_tools")
+
+    # Conditional routing from reflect
+    navigator.add_conditional_edges(
+        "reflect",
+        route_navigator,
+        {
+            "execute_tools": "execute_tools",
+            "verify": "verify",
+            "retry_broader": "retry_broader",
+            "exit_success": "exit_success",
+            "exit_failure": "exit_failure",
+        }
+    )
+
+    # Terminal edges
+    navigator.add_edge("exit_success", END)
+    navigator.add_edge("exit_failure", END)
+
+    return navigator.compile()
+
+
 def create_agent(title_collection: str, text_collection: str):
     """
     Create a LangGraph agent for retrieval.
@@ -582,352 +1222,87 @@ def create_agent(title_collection: str, text_collection: str):
         return out
 
     # =========================================================================
-    # Navigation tools for structural queries
+    # Navigator Sub-graph Integration
     # =========================================================================
 
-    def nav_search_title(query: str, top_k: int = 5) -> str:
-        """
-        Search for sections by title (semantic search on headings).
-        Use to find chapter landmarks or section headers.
-
-        Args:
-            query: e.g., "Chapter 4", "Review Questions"
-            top_k: Number of results (default: 5)
-
-        Returns:
-            JSON with matches: [{node_id, title, similarity_score}, ...]
-        """
-        logger.info(f"[NAV] nav_search_title: query='{query}', top_k={top_k}")
-        try:
-            results = retrieval_tools.search_by_title(query, title_collection, top_k)
-            # Simplify output for navigation
-            simplified = [
-                {
-                    "node_id": r.get("node_id"),
-                    "title": r.get("title"),
-                    "similarity_score": round(r.get("similarity_score", 0), 3)
-                }
-                for r in results
-            ]
-            return json.dumps(simplified, indent=2)
-        except Exception as e:
-            logger.error(f"[NAV] nav_search_title failed: {e}")
-            return json.dumps({"error": str(e)})
-
-    def nav_explore_titles(node_id: str, direction: str = "both", radius: int = 10) -> str:
-        """
-        Get section titles around a node to understand document structure.
-
-        Args:
-            node_id: Center node to explore around
-            direction: "up" (earlier in doc), "down" (later), "both"
-            radius: How many nodes in each direction (default: 10)
-
-        Returns:
-            JSON with titles: [{node_id, title, position}, ...]
-        """
-        logger.info(f"[NAV] nav_explore_titles: node_id={node_id}, direction={direction}, radius={radius}")
-        try:
-            # Map direction values
-            dir_map = {"up": "up", "down": "down", "both": "both"}
-            actual_direction = dir_map.get(direction, "both")
-
-            titles = retrieval_tools.explore_titles(node_id, text_collection, radius, actual_direction)
-            return json.dumps(titles, indent=2)
-        except Exception as e:
-            logger.error(f"[NAV] nav_explore_titles failed: {e}")
-            return json.dumps({"error": str(e)})
-
-    def nav_peek_content(node_id: str) -> str:
-        """
-        Get the full content of a specific node to verify it matches.
-        Use sparingly - only when title is ambiguous.
-
-        Args:
-            node_id: Node to peek at
-
-        Returns:
-            JSON with {node_id, title, text_preview (first 500 chars)}
-        """
-        logger.info(f"[NAV] nav_peek_content: node_id={node_id}")
-        try:
-            node = retrieval_tools.get_node(node_id, text_collection)
-            if node:
-                return json.dumps({
-                    "node_id": node.get("node_id"),
-                    "title": node.get("title"),
-                    "text_preview": (node.get("text") or "")[:500]
-                }, indent=2)
-            return json.dumps({"error": f"Node {node_id} not found"})
-        except Exception as e:
-            logger.error(f"[NAV] nav_peek_content failed: {e}")
-            return json.dumps({"error": str(e)})
-
-    def nav_mark_found(node_ids: List[str]) -> str:
-        """
-        Mark nodes as the target. Call this when you've found what the user is looking for.
-        This will end the navigation and return these nodes.
-
-        Args:
-            node_ids: List of node IDs that match the user's request
-
-        Returns:
-            Confirmation message
-        """
-        logger.info(f"[NAV] nav_mark_found: {node_ids}")
-        return json.dumps({"status": "found", "node_ids": node_ids})
-
-    # Navigation tool definitions for LLM binding
-    from langchain_core.tools import StructuredTool
-    from pydantic import BaseModel, Field as PydanticField
-
-    class NavSearchTitleInput(BaseModel):
-        query: str = PydanticField(description="Search query for title, e.g. 'Chapter 4'")
-        top_k: int = PydanticField(default=5, description="Number of results")
-
-    class NavExploreTitlesInput(BaseModel):
-        node_id: str = PydanticField(description="Center node ID to explore around")
-        direction: str = PydanticField(default="both", description="Direction: 'up', 'down', or 'both'")
-        radius: int = PydanticField(default=10, description="How many nodes in each direction")
-
-    class NavPeekContentInput(BaseModel):
-        node_id: str = PydanticField(description="Node ID to peek at")
-
-    class NavMarkFoundInput(BaseModel):
-        node_ids: List[str] = PydanticField(description="List of node IDs that match the user's request")
-
-    nav_tools = [
-        StructuredTool.from_function(
-            func=nav_search_title,
-            name="nav_search_title",
-            description="Search for sections by title to find chapter landmarks or section headers",
-            args_schema=NavSearchTitleInput
-        ),
-        StructuredTool.from_function(
-            func=nav_explore_titles,
-            name="nav_explore_titles",
-            description="Get section titles around a node to understand document structure",
-            args_schema=NavExploreTitlesInput
-        ),
-        StructuredTool.from_function(
-            func=nav_peek_content,
-            name="nav_peek_content",
-            description="Get a node's content preview to verify it matches (use sparingly)",
-            args_schema=NavPeekContentInput
-        ),
-        StructuredTool.from_function(
-            func=nav_mark_found,
-            name="nav_mark_found",
-            description="Mark nodes as found. Call when you've located the target sections.",
-            args_schema=NavMarkFoundInput
-        ),
-    ]
+    # Create the navigator sub-graph
+    navigator_subgraph = create_navigator_subgraph(
+        llm=llm,
+        retrieval_tools_instance=retrieval_tools,
+        title_collection=title_collection,
+        text_collection=text_collection,
+        tracer=tracer
+    )
 
     def navigate_structure(state: AgentState) -> Dict[str, Any]:
         """
-        Navigation sub-agent: iteratively explores document structure to find target sections.
-        Only runs if structural intent was detected in planner.
+        Navigate document structure using the navigator sub-graph.
+
+        This wrapper:
+        1. Checks if structural navigation is needed
+        2. Transforms AgentState hints into NavigatorState input
+        3. Invokes the compiled navigator sub-graph
+        4. Returns structural_seeds to the parent graph
         """
         plan = state.get("plan") or {}
         hints = plan.get("structural_hints", {})
-        user_query = state["user_query"]
 
         if not hints.get("has_structural"):
             logger.info("[NAVIGATE] No structural intent detected, skipping navigation")
             return {"structural_seeds": []}
 
-        logger.info(f"[NAVIGATE] Starting structural navigation for: {user_query}")
+        logger.info(f"[NAVIGATE] Starting structural navigation with sub-graph")
         logger.info(f"[NAVIGATE] Hints: chapter={hints.get('chapter')}, position={hints.get('position')}, keywords={hints.get('section_keywords')}")
 
-        with tracer.span("navigate_structure", input={"hints": hints, "query": user_query}) as span:
-            # Create navigation LLM with tools
-            nav_llm = llm.bind_tools(nav_tools)
-
-            # Build initial prompt
-            chapter_num = hints.get('chapter')
-            position = hints.get('position', 'any')
-            keywords = hints.get('section_keywords', [])
-
-            if chapter_num:
-                user_msg = f"""Find: "{user_query}"
-
-TARGET: Find "{' '.join(keywords)}" section in Chapter {chapter_num}
-POSITION: {position} of the chapter (end = explore DOWN, beginning = explore UP)
-
-STEP 1: Search for "Chapter {chapter_num}" to find the chapter landmark
-STEP 2: Explore {position if position in ('down', 'up') else 'down' if position == 'end' else 'down'} from the chapter landmark
-STEP 3: Find the section with keywords: {keywords}
-STEP 4: VERIFY it's after Chapter {chapter_num} header and BEFORE Chapter {chapter_num + 1} header
-STEP 5: Call nav_mark_found with the correct node IDs
-
-DO NOT search for "{' '.join(keywords)}" directly - it will match wrong chapters!"""
-            else:
-                user_msg = f"""Find: "{user_query}"
-
-Keywords to look for: {keywords}
-Position hint: {position}
-
-Start by searching for a relevant landmark, then explore to find the target section.
-When you find the matching sections, call nav_mark_found with their node IDs."""
-
-            # Navigation state tracking
-            nav_state = {
-                "landmark_node": None,       # The chapter/section landmark we started from
-                "landmark_title": None,      # Title of the landmark
-                "current_position": None,    # Current node we're exploring around
-                "direction": hints.get("position", "both"),  # "end" → down, "beginning" → up
-                "explored_centers": set(),   # Nodes we've explored around (don't re-explore)
-                "seen_nodes": {},            # node_id → title (all nodes we've seen)
-                "search_results": [],        # Results from title searches
+        with tracer.span("navigate_structure", input={"hints": hints}) as span:
+            # Build NavigatorState input
+            navigator_input: Dict[str, Any] = {
+                "chapter": hints.get("chapter"),
+                "position": hints.get("position"),
+                "section_keywords": hints.get("section_keywords", []),
+                "goal": "",  # Will be set by parse_goal node
+                "messages": [],
+                "iteration": 0,
+                "max_iterations": NAVIGATOR_MAX_ITERATIONS,
+                "scope_level": 0,
+                "status": "searching",
+                "explored_centers": [],
+                "seen_nodes": {},
+                "candidate_nodes": [],
+                "found_nodes": [],
+                "landmark_node_id": None,
+                "current_position": "",
+                "last_action": "",
+                "reflection": "",
+                "structural_seeds": [],
             }
 
-            def get_nav_status() -> str:
-                """Build status string for LLM context."""
-                status_lines = ["=== NAVIGATION STATUS ==="]
-                if nav_state["landmark_node"]:
-                    status_lines.append(f"Landmark: [{nav_state['landmark_node']}] {nav_state['landmark_title']}")
-                if nav_state["current_position"]:
-                    status_lines.append(f"Current position: {nav_state['current_position']}")
-                status_lines.append(f"Direction hint: {nav_state['direction']} (end=down, beginning=up)")
-                status_lines.append(f"Explored around {len(nav_state['explored_centers'])} nodes: {sorted(nav_state['explored_centers'])}")
-                status_lines.append(f"Total nodes seen: {len(nav_state['seen_nodes'])}")
-                return "\n".join(status_lines)
+            # Invoke sub-graph
+            try:
+                result = navigator_subgraph.invoke(navigator_input)
+                structural_seeds = result.get("structural_seeds", [])
 
-            messages = [
-                SystemMessage(content=NAVIGATION_SYSTEM_PROMPT),
-                HumanMessage(content=user_msg)
-            ]
+                logger.info(f"[NAVIGATE] Sub-graph completed: status={result.get('status')}, "
+                           f"found {len(structural_seeds)} seeds, "
+                           f"iterations={result.get('iteration')}, "
+                           f"scope={result.get('scope_level')}")
 
-            found_nodes: List[str] = []
-            max_iterations = 8
+                if span is not None:
+                    span.update(output={
+                        "found_count": len(structural_seeds),
+                        "node_ids": [s.get("node_id") for s in structural_seeds],
+                        "final_status": result.get("status"),
+                        "iterations_used": result.get("iteration"),
+                        "scope_level": result.get("scope_level"),
+                    })
 
-            for iteration in range(max_iterations):
-                logger.info(f"[NAVIGATE] Iteration {iteration + 1}/{max_iterations}, explored centers: {len(nav_state['explored_centers'])}, seen: {len(nav_state['seen_nodes'])}")
+                return {"structural_seeds": structural_seeds}
 
-                t0 = time.time()
-                response = nav_llm.invoke(messages)
-                dt = int((time.time() - t0) * 1000)
-
-                messages.append(response)
-
-                tracer.event(
-                    "navigate.llm_call",
-                    input={"iteration": iteration + 1, "explored": len(nav_state['explored_centers'])},
-                    output={"has_tool_calls": bool(response.tool_calls)},
-                    metadata={"duration_ms": dt},
-                )
-
-                # Check for tool calls
-                if not response.tool_calls:
-                    logger.info("[NAVIGATE] No tool calls, ending navigation")
-                    break
-
-                # Process each tool call
-                from langchain_core.messages import ToolMessage
-                for tool_call in response.tool_calls:
-                    tool_name = tool_call["name"]
-                    tool_args = tool_call["args"]
-
-                    logger.info(f"[NAVIGATE] Tool call: {tool_name}({tool_args})")
-
-                    # Execute tool with state tracking
-                    if tool_name == "nav_mark_found":
-                        found_nodes = tool_args.get("node_ids", [])
-                        result = nav_mark_found(found_nodes)
-                        logger.info(f"[NAVIGATE] Found target nodes: {found_nodes}")
-
-                    elif tool_name == "nav_search_title":
-                        result = nav_search_title(**tool_args)
-                        # Track search results and set landmark
-                        try:
-                            search_data = json.loads(result)
-                            if isinstance(search_data, list) and search_data:
-                                nav_state["search_results"] = search_data
-                                # First result becomes landmark if not set
-                                if not nav_state["landmark_node"]:
-                                    nav_state["landmark_node"] = search_data[0].get("node_id")
-                                    nav_state["landmark_title"] = search_data[0].get("title")
-                                    nav_state["current_position"] = nav_state["landmark_node"]
-                                for r in search_data:
-                                    nid = r.get("node_id")
-                                    if nid:
-                                        nav_state["seen_nodes"][nid] = r.get("title", "")
-                        except:
-                            pass
-
-                    elif tool_name == "nav_explore_titles":
-                        center_node = tool_args.get("node_id", "")
-
-                        # Check if already explored this center
-                        if center_node in nav_state["explored_centers"]:
-                            result = json.dumps({
-                                "error": f"Already explored around node {center_node}!",
-                                "suggestion": "Pick a node at the EDGE of what you've seen to explore further.",
-                                "explored_centers": sorted(nav_state["explored_centers"]),
-                                "nav_status": get_nav_status()
-                            })
-                            logger.warning(f"[NAVIGATE] Blocked re-exploration of {center_node}")
-                        else:
-                            result = nav_explore_titles(**tool_args)
-                            nav_state["explored_centers"].add(center_node)
-                            nav_state["current_position"] = center_node
-
-                            # Track all seen nodes from results
-                            try:
-                                titles_data = json.loads(result)
-                                if isinstance(titles_data, list):
-                                    for t in titles_data:
-                                        nid = t.get("node_id")
-                                        if nid:
-                                            nav_state["seen_nodes"][nid] = t.get("title", "")
-                                    # Append status to help LLM
-                                    result = json.dumps({
-                                        "titles": titles_data,
-                                        "nav_status": get_nav_status()
-                                    }, indent=2)
-                            except:
-                                pass
-
-                    elif tool_name == "nav_peek_content":
-                        result = nav_peek_content(**tool_args)
-                    else:
-                        result = json.dumps({"error": f"Unknown tool: {tool_name}"})
-
-                    messages.append(ToolMessage(content=result, tool_call_id=tool_call["id"]))
-
-                if found_nodes:
-                    break
-
-            # Log final status
-            if not found_nodes:
-                logger.warning(f"[NAVIGATE] Finished without finding target. Explored {len(nav_state['explored_centers'])} centers, saw {len(nav_state['seen_nodes'])} nodes")
-            else:
-                logger.info(f"[NAVIGATE] Found targets after exploring {len(nav_state['explored_centers'])} centers")
-
-            # Fetch full content for found nodes
-            structural_seeds: List[Dict[str, Any]] = []
-            if found_nodes:
-                try:
-                    nodes = retrieval_tools.get_nodes(found_nodes, text_collection)
-                    for i, node in enumerate(nodes):
-                        structural_seeds.append({
-                            **node,
-                            "source": "structural",
-                            "similarity_score": 1.0 - (i * 0.01),  # Slightly decrease for ordering
-                            "relevance_grade": "high",  # Structural matches are high relevance
-                        })
-                    logger.info(f"[NAVIGATE] Retrieved {len(structural_seeds)} structural seeds")
-                except Exception as e:
-                    logger.error(f"[NAVIGATE] Failed to fetch found nodes: {e}")
-
-            if span is not None:
-                span.update(output={
-                    "found_node_ids": found_nodes,
-                    "num_structural_seeds": len(structural_seeds),
-                    "iterations_used": iteration + 1,
-                })
-
-            return {"structural_seeds": structural_seeds}
+            except Exception as e:
+                logger.error(f"[NAVIGATE] Sub-graph failed: {e}", exc_info=True)
+                if span is not None:
+                    span.update(output={"error": str(e)})
+                return {"structural_seeds": []}
 
     def planner(state: AgentState) -> Dict[str, Any]:
         """
@@ -1017,6 +1392,9 @@ When you find the matching sections, call nav_mark_found with their node IDs."""
 
         Merges structural seeds (from navigation) with semantic search results.
         Structural seeds are prioritized (appear first).
+        
+        OPTIMIZATION: If structural navigation found high-quality seeds (relevance_grade="high"),
+        skip semantic search to save API calls and time.
         """
         plan = state.get("plan") or {}
         subqueries = plan.get("subqueries", [state["user_query"]])
@@ -1036,27 +1414,42 @@ When you find the matching sections, call nav_mark_found with their node IDs."""
                 if node_id:
                     all_candidates[node_id] = s
 
-            # 2. Also do semantic search
-            for query in subqueries:
-                t0 = time.time()
-                results = retrieval_tools.search_by_text(query, text_collection, top_k=top_k)
-                dt = int((time.time() - t0) * 1000)
+            # Check if structural seeds are high-quality (navigation successfully found target)
+            has_high_quality_structural = any(
+                s.get("relevance_grade") == "high" 
+                for s in structural_seeds
+            )
 
+            # 2. Skip semantic search if we have high-quality structural seeds
+            # This saves API calls when navigation successfully found the target
+            if has_high_quality_structural and structural_seeds:
+                logger.info(f"[RETRIEVE] High-quality structural seeds found, skipping semantic search to save API calls")
                 tracer.event(
-                    "retrieve_seeds.subquery",
-                    input={"query": query, "top_k": top_k, "collection": text_collection},
-                    output={
-                        "num_results": len(results),
-                        "node_ids": [r.get("node_id") for r in results[:50]],
-                    },
-                    metadata={"duration_ms": dt},
+                    "retrieve_seeds.skip_semantic",
+                    input={"reason": "high_quality_structural_seeds", "num_structural": len(structural_seeds)},
                 )
+            else:
+                # 2. Do semantic search to complement structural seeds
+                for query in subqueries:
+                    t0 = time.time()
+                    results = retrieval_tools.search_by_text(query, text_collection, top_k=top_k)
+                    dt = int((time.time() - t0) * 1000)
 
-                for r in results:
-                    node_id = r.get("node_id")
-                    if node_id and node_id not in all_candidates:
-                        r["source"] = "semantic"
-                        all_candidates[node_id] = r
+                    tracer.event(
+                        "retrieve_seeds.subquery",
+                        input={"query": query, "top_k": top_k, "collection": text_collection},
+                        output={
+                            "num_results": len(results),
+                            "node_ids": [r.get("node_id") for r in results[:50]],
+                        },
+                        metadata={"duration_ms": dt},
+                    )
+
+                    for r in results:
+                        node_id = r.get("node_id")
+                        if node_id and node_id not in all_candidates:
+                            r["source"] = "semantic"
+                            all_candidates[node_id] = r
 
             # 3. Sort: structural first, then by similarity score
             sorted_candidates = sorted(
@@ -1287,8 +1680,14 @@ When you find the matching sections, call nav_mark_found with their node IDs."""
                 title = (n.get("title") or "").strip()
                 text = (n.get("text") or "").strip()
                 grade = n.get("relevance_grade", "unknown")
-                # Keep context compact but useful
-                snippet = text[:1200]
+                
+                # Don't truncate high-grade nodes - they're directly relevant and need full context
+                # For medium-grade nodes, use a higher limit to preserve more context
+                if grade == "high":
+                    snippet = text  # Full text for high-quality nodes
+                else:
+                    snippet = text[:5000]  # Increased from 1200 to 5000 for medium nodes
+                
                 evidence_lines.append(f"[Node {nid}: {title}] (grade: {grade})\n{snippet}")
 
             sys = SystemMessage(
