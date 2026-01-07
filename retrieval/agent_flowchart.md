@@ -1,7 +1,9 @@
 # Retrieval Agent Architecture Flowchart
 
 ## Overview
-This document visualizes the LangGraph-based agentic retrieval system with **structural navigation sub-graph** and **per-seed processing** architecture.
+This document visualizes the LangGraph-based agentic retrieval system with **two ReAct-style sub-graphs**:
+1. **Navigator Sub-graph**: For structural document navigation (chapter/section finding)
+2. **RetrievalLoop Sub-graph**: For ReAct-style seed processing with reflection, adaptation, and retry
 
 ## Main Agent Flowchart
 
@@ -16,27 +18,25 @@ flowchart TD
     Navigate -->|no structural| Retrieve[retrieve_seeds]
     NavigatorSubgraph -->|structural_seeds| Retrieve
     
-    Retrieve -->|high-quality structural?| SkipSemantic{Skip Semantic Search?}
-    SkipSemantic -->|Yes| SeedsReady[Seeds Ready]
-    SkipSemantic -->|No| SemanticSearch[Semantic Search]
-    SemanticSearch --> SeedsReady
+    Retrieve -->|seeds| RetrievalLoop[RetrievalLoop Sub-graph]
     
-    SeedsReady --> ProcessSeed[process_seed]
-    
-    subgraph SeedLoop["Per-Seed Processing Loop"]
-        ProcessSeed --> Route{more seeds?}
-        Route -->|continue| ProcessSeed
+    subgraph RetrievalLoopBox["RetrievalLoop Sub-graph"]
+        direction TB
+        InitLoop[init_loop] --> ProcessSeed[process_seed]
+        ProcessSeed --> Reflect[reflect]
+        Reflect -->|continue| ProcessSeed
+        Reflect -->|early_exit/all_processed| CheckEvidence[check_evidence]
+        CheckEvidence -->|sufficient| Synthesize[synthesize]
+        CheckEvidence -->|insufficient| RetrySearch[retry_search]
+        RetrySearch --> ProcessSeed
+        Synthesize --> Validate[validate]
+        Validate -->|ok| ExitSuccess[exit_success]
+        Validate -->|retry| RetrySynthesis[retry_synthesis]
+        Validate -->|acceptable| ExitBest[exit_best_effort]
+        RetrySynthesis --> Synthesize
     end
     
-    Route -->|done| Synthesize[synthesize]
-    Synthesize --> Validate[validate]
-    Validate --> DoneNode([Done])
-    
-    style NavigatorSubgraph fill:#e1f5ff,stroke:#0066cc,stroke-width:2px
-    style SeedLoop fill:#e8f4e8,stroke:#2d5a2d,stroke-width:2px
-    style ProcessSeed fill:#f9f,stroke:#333,stroke-width:2px
-    style Route fill:#ff9,stroke:#333,stroke-width:2px
-    style SkipSemantic fill:#fff4e6,stroke:#ff8800,stroke-width:2px
+    RetrievalLoop --> DoneNode([Done])
 ```
 
 ## Navigator Sub-graph Flowchart
@@ -45,27 +45,51 @@ flowchart TD
 flowchart TD
     StartNav([Navigator Input]) --> ParseGoal[parse_goal]
     ParseGoal --> ExecuteTools[execute_tools]
-    ExecuteTools --> Reflect[reflect]
+    ExecuteTools --> NavReflect[reflect]
     
-    Reflect -->|status=found| ExitSuccess[exit_success]
-    Reflect -->|status=verifying| Verify[verify]
-    Reflect -->|status=retry| RetryBroader[retry_broader]
-    Reflect -->|status=searching| ExecuteTools
-    Reflect -->|status=failed| ExitFailure[exit_failure]
+    NavReflect -->|status=found| NavExitSuccess[exit_success]
+    NavReflect -->|status=verifying| Verify[verify]
+    NavReflect -->|status=retry| RetryBroader[retry_broader]
+    NavReflect -->|status=searching| ExecuteTools
+    NavReflect -->|status=failed| NavExitFailure[exit_failure]
     
-    Verify -->|status=found| ExitSuccess
-    Verify -->|status=searching| Reflect
+    Verify -->|status=found| NavExitSuccess
+    Verify -->|status=searching| NavReflect
     
     RetryBroader --> ExecuteTools
     
-    ExitSuccess --> EndNav([Return structural_seeds])
-    ExitFailure --> EndNav
+    NavExitSuccess --> EndNav([Return structural_seeds])
+    NavExitFailure --> EndNav
+```
+
+## RetrievalLoop Sub-graph Flowchart (Detailed)
+
+```mermaid
+flowchart TD
+    StartLoop([RetrievalLoop Input]) --> InitLoop[init_loop]
+    InitLoop --> ProcessSeed[process_seed]
+    ProcessSeed --> Reflect[reflect]
     
-    style ParseGoal fill:#e1f5ff,stroke:#0066cc,stroke-width:2px
-    style ExecuteTools fill:#fff4e6,stroke:#ff8800,stroke-width:2px
-    style Reflect fill:#ffe6e6,stroke:#cc0000,stroke-width:2px
-    style Verify fill:#e6ffe6,stroke:#00cc00,stroke-width:2px
-    style ExitSuccess fill:#e6ffe6,stroke:#00cc00,stroke-width:3px
+    Reflect -->|continue| ProcessSeed
+    Reflect -->|early_exit| CheckEvidence[check_evidence]
+    Reflect -->|all_processed| CheckEvidence
+    
+    CheckEvidence -->|sufficient| Synthesize[synthesize]
+    CheckEvidence -->|insufficient| RetrySearch[retry_search]
+    
+    RetrySearch -->|retries_left| ProcessSeed
+    RetrySearch -->|max_retries| Synthesize
+    
+    Synthesize --> Validate[validate]
+    
+    Validate -->|ok| ExitSuccess[exit_success]
+    Validate -->|poor| RetrySynthesis[retry_synthesis]
+    Validate -->|acceptable| ExitBest[exit_best_effort]
+    
+    RetrySynthesis --> Synthesize
+    
+    ExitSuccess --> EndLoop([Return Result])
+    ExitBest --> EndLoop
 ```
 
 ## Complete State Machine
@@ -79,66 +103,57 @@ stateDiagram-v2
     state NavigatorSubgraph {
         [*] --> ParseGoal
         ParseGoal --> ExecuteTools
-        ExecuteTools --> Reflect
-        Reflect --> Verify: verifying
-        Reflect --> RetryBroader: retry
-        Reflect --> ExecuteTools: searching
-        Reflect --> ExitSuccess: found
-        Reflect --> ExitFailure: failed
-        Verify --> ExitSuccess: found
-        Verify --> Reflect: searching
-        RetryBroader --> ExecuteTools
-        ExitSuccess --> [*]
-        ExitFailure --> [*]
+        ExecuteTools --> NavReflect
+        NavReflect --> Verify: verifying
+        NavReflect --> NavRetryBroader: retry
+        NavReflect --> ExecuteTools: searching
+        NavReflect --> NavExitSuccess: found
+        NavReflect --> NavExitFailure: failed
+        Verify --> NavExitSuccess: found
+        Verify --> NavReflect: searching
+        NavRetryBroader --> ExecuteTools
+        NavExitSuccess --> [*]
+        NavExitFailure --> [*]
     }
     
     Navigate --> NavigatorSubgraph: has_structural
     Navigate --> Retrieve: no_structural
     NavigatorSubgraph --> Retrieve: structural_seeds
     
-    state SeedLoop {
-        Retrieve --> ProcessSeed
-        ProcessSeed --> ProcessSeed: continue (more seeds)
+    state RetrievalLoopSubgraph {
+        [*] --> InitLoop
+        InitLoop --> ProcessSeed
+        ProcessSeed --> LoopReflect
+        LoopReflect --> ProcessSeed: continue
+        LoopReflect --> CheckEvidence: early_exit/all_processed
+        CheckEvidence --> Synthesize: sufficient
+        CheckEvidence --> RetrySearch: insufficient
+        RetrySearch --> ProcessSeed: retries_left
+        RetrySearch --> Synthesize: max_retries
+        Synthesize --> Validate
+        Validate --> ExitSuccess: ok
+        Validate --> RetrySynthesis: poor
+        Validate --> ExitBestEffort: acceptable
+        RetrySynthesis --> Synthesize
+        ExitSuccess --> [*]
+        ExitBestEffort --> [*]
     }
     
-    ProcessSeed --> Synthesize: done (all processed)
-    Synthesize --> Validate
-    Validate --> [*]
+    Retrieve --> RetrievalLoopSubgraph
+    RetrievalLoopSubgraph --> [*]
     
     note right of Planner
         LLM produces JSON plan
-        (subqueries, top_k, radius, max_seeds)
         + structural_hints detection
     end note
     
-    note right of Navigate
-        Checks structural intent
-        If detected: invoke Navigator sub-graph
-        Returns structural_seeds
-    end note
-    
-    note right of Retrieve
-        OPTIMIZATION: Skip semantic search
-        if high-quality structural seeds found
-        Merges structural + semantic seeds
-        Select top 5 seeds by priority
-    end note
-    
-    note right of ProcessSeed
-        For EACH seed:
-        1. Grade seed individually (1 LLM call)
-        2. If relevant: expand radius 3
-        3. Batch-grade neighbors (1 LLM call)
-        4. Add relevant to evidence_pool
-        5. Move to next seed
-    end note
-    
-    note right of Synthesize
-        OPTIMIZATION: High-grade nodes
-        get FULL text (no truncation)
-        Medium-grade: 5000 chars max
-        Use accumulated evidence_pool
-        Sorted by grade (high first)
+    note right of RetrievalLoopSubgraph
+        ReAct-style processing:
+        - Reflection after each seed
+        - Adaptive expansion radius
+        - Evidence sufficiency check
+        - Scope expansion retry
+        - Synthesis retry with feedback
     end note
 ```
 
@@ -159,19 +174,11 @@ stateDiagram-v2
         ┌────────────────────────┐
         │  create_agent()         │
         │  - Initialize ChatOpenAI│
-        │  - Create Navigator    │
+        │  - Create Navigator     │
+        │    Sub-graph            │
+        │  - Create RetrievalLoop │
         │    Sub-graph            │
         │  - Build StateGraph     │
-        │  - Add nodes & edges    │
-        └────────────┬────────────┘
-                     │
-                     ▼
-        ┌────────────────────────┐
-        │  Initialize State       │
-        │  - pending_seeds: []    │
-        │  - evidence_pool: []    │
-        │  - visited_node_ids: [] │
-        │  - structural_seeds: [] │
         └────────────┬────────────┘
                      │
                      ▼
@@ -179,7 +186,6 @@ stateDiagram-v2
         │   PLANNER               │
         │   - Generate subqueries │
         │   - Set top_k, radius   │
-        │   - Set max_seeds (5)   │
         │   - Detect structural   │
         │     intent              │
         └────────────┬────────────┘
@@ -187,322 +193,227 @@ stateDiagram-v2
                      ▼
         ┌────────────────────────┐
         │   NAVIGATE_STRUCTURE    │
+        │   (Navigator Sub-graph) │
         │                         │
-        │   ┌─────────────────┐  │
-        │   │ Navigator Sub-  │  │
-        │   │ graph:          │  │
-        │   │                 │  │
-        │   │ parse_goal →    │  │
-        │   │ execute_tools → │  │
-        │   │ reflect →       │  │
-        │   │ verify →        │  │
-        │   │ exit_success    │  │
-        │   └─────────────────┘  │
-        │                         │
-        │   Returns: structural_  │
-        │   seeds (if found)      │
+        │   Returns:              │
+        │   structural_seeds      │
         └────────────┬────────────┘
                      │
                      ▼
         ┌────────────────────────┐
         │   RETRIEVE_SEEDS        │
         │                         │
-        │   1. Add structural     │
-        │      seeds (if any)     │
-        │                         │
-        │   2. Check quality:     │
-        │      high-grade?        │
-        │      ┌──────────────┐   │
-        │      │ YES: Skip    │   │
-        │      │ semantic     │   │
-        │      │ search       │   │
-        │      └──────────────┘   │
-        │      ┌──────────────┐   │
-        │      │ NO: Do       │   │
-        │      │ semantic     │   │
-        │      │ search       │   │
-        │      └──────────────┘   │
-        │                         │
-        │   3. Select top 5 seeds │
+        │   - Add structural      │
+        │     seeds               │
+        │   - Skip semantic if    │
+        │     high-quality        │
+        │   - Select seeds        │
         └────────────┬────────────┘
                      │
                      ▼
-        ┌────────────────────────┐
-        │   PROCESS_SEED LOOP     │
-        │                         │
-        │   For each seed:        │
-        │   ├─ Grade individually │
-        │   ├─ If relevant:       │
-        │   │  ├─ Expand radius 3 │
-        │   │  ├─ Batch-grade     │
-        │   │  └─ Add to evidence │
-        │   └─ Move to next seed  │
-        └────────────┬────────────┘
-                     │
-        ┌────────────┴────────────┐
-        │                          │
-        ▼                          ▼
-┌───────────────┐         ┌───────────────┐
-│   continue    │         │     done      │
-│  (more seeds) │         │ (all seeds    │
-│               │         │  processed)   │
-└───────┬───────┘         └───────┬───────┘
-        │                          │
-        └──────┐                   │
-               │                   │
-               ▼                   ▼
-        ┌──────────────┐   ┌───────────────┐
-        │ process_seed │   │   SYNTHESIZE   │
-        │   (loop)     │   │   - Use top    │
-        └──────────────┘   │     evidence   │
-                           │   - High-grade │
-                           │     nodes: FULL │
-                           │     text        │
-                           │   - Medium:     │
-                           │     5000 chars  │
-                           │   - Generate    │
-                           │     answer      │
-                           └───────┬───────┘
-                                   │
-                                   ▼
-                           ┌───────────────┐
-                           │   VALIDATE     │
-                           │   - Check      │
-                           │     citations  │
-                           │   - NO retry   │
-                           └───────┬───────┘
-                                   │
-                                   ▼
+        ┌────────────────────────────────────────────────────────────┐
+        │                 RETRIEVAL LOOP SUB-GRAPH                    │
+        │                                                             │
+        │   ┌─────────────────────────────────────────────────────┐  │
+        │   │  init_loop → process_seed → reflect                  │  │
+        │   │       │                          │                   │  │
+        │   │       │        ┌─────────────────┘                   │  │
+        │   │       │        │                                     │  │
+        │   │       │        ▼                                     │  │
+        │   │       │    ┌───────────┐                             │  │
+        │   │       │    │ continue? │──YES──┐                     │  │
+        │   │       │    └───────────┘       │                     │  │
+        │   │       │        │               │                     │  │
+        │   │       │       NO               │                     │  │
+        │   │       │        ▼               │                     │  │
+        │   │       │   check_evidence       │                     │  │
+        │   │       │        │               │                     │  │
+        │   │       │   ┌────┴────┐          │                     │  │
+        │   │       │   │         │          │                     │  │
+        │   │       │   ▼         ▼          │                     │  │
+        │   │       │ sufficient  insufficient                     │  │
+        │   │       │   │         │          │                     │  │
+        │   │       │   │    retry_search    │                     │  │
+        │   │       │   │         │          │                     │  │
+        │   │       │   │         └──────────┘                     │  │
+        │   │       │   ▼                                          │  │
+        │   │       │ synthesize                                   │  │
+        │   │       │   │                                          │  │
+        │   │       │   ▼                                          │  │
+        │   │       │ validate                                     │  │
+        │   │       │   │                                          │  │
+        │   │       │   ├───ok──────► exit_success                 │  │
+        │   │       │   ├───acceptable─► exit_best_effort          │  │
+        │   │       │   └───poor────► retry_synthesis ─┐           │  │
+        │   │       │                                  │           │  │
+        │   │       │                    synthesize ◄──┘           │  │
+        │   │       └──────────────────────────────────────────────┘  │
+        └────────────────────────────┬───────────────────────────────┘
+                                     │
+                                     ▼
                            ┌──────────────┐
                            │      END      │
                            │   Return:     │
                            │   - answer    │
                            │   - evidence  │
+                           │   - validation│
                            └───────────────┘
 ```
 
-## Navigator Sub-graph Details
+## RetrievalLoop Sub-graph Details
 
-### Navigator State Machine
+### RetrievalLoopState
 
-```
-NavigatorState {
-    # Input
-    goal: str                    # Natural language goal
-    chapter: Optional[int]        # Target chapter number
-    position: Optional[str]       # "end" or "beginning"
-    section_keywords: List[str]  # Keywords to look for
+```python
+class RetrievalLoopState(TypedDict):
+    # Input from parent
+    user_query: str
+    subqueries: List[str]
+    text_collection: str
+    initial_seeds: List[Dict[str, Any]]
     
-    # Navigation tracking
-    landmark_node_id: Optional[str]  # Chapter landmark found
-    current_position: str            # Current exploration center
-    explored_centers: List[str]      # Prevent re-exploration
-    seen_nodes: Dict[str, str]       # node_id → title
+    # Processing state
+    pending_seeds: List[Dict[str, Any]]
+    visited_node_ids: List[str]
+    evidence_pool: List[Dict[str, Any]]
     
-    # Results
-    candidate_nodes: List[Dict]      # Potential matches
-    found_nodes: List[str]           # Confirmed node IDs
+    # Loop control
+    iteration: int
+    max_iterations: int                    # 15 per scope
+    scope_level: int                       # 0=focused, 1=expanded, 2=broad
+    status: str                            # processing|reflecting|checking|...
+    seeds_processed: int
+    total_seeds: int
     
-    # Control flow
-    messages: List[BaseMessage]       # Conversation history
-    iteration: int                   # Current iteration
-    max_iterations: int              # Max per scope (8)
-    scope_level: int                 # 0=narrow, 1=medium, 2=broad
-    status: str                      # searching|verifying|found|failed|retry
-    last_action: str                # Description
-    reflection: str                  # Agent reflection
+    # Reflection state
+    reflection: str
+    last_action: str
+    high_grade_count: int
+    medium_grade_count: int
+    
+    # Synthesis state
+    final_answer: str
+    synthesis_attempts: int                # Max 2 retries
+    validation: Dict[str, Any]
+    synthesis_feedback: str
     
     # Output
-    structural_seeds: List[Dict]     # Final output nodes
+    result: Dict[str, Any]
+```
+
+### Scope Levels
+
+```python
+RETRIEVAL_SCOPE_PARAMS = {
+    0: {"top_k": 8,  "radius": 3, "max_seeds": 5,  "name": "focused"},
+    1: {"top_k": 12, "radius": 5, "max_seeds": 7,  "name": "expanded"},
+    2: {"top_k": 16, "radius": 7, "max_seeds": 10, "name": "broad"},
 }
 ```
 
-### Navigator Scope Levels
+### Status Values
 
-```
-Scope 0 (narrow):   radius=10, top_k=5   # Initial focused search
-Scope 1 (medium):  radius=15, top_k=8   # After first failure
-Scope 2 (broad):    radius=25, top_k=12  # Maximum expansion
-```
+| Status | Description |
+|--------|-------------|
+| `processing` | Processing seeds |
+| `reflecting` | Evaluating progress |
+| `checking_evidence` | Checking if evidence is sufficient |
+| `retrying_search` | Retrying with broader scope |
+| `synthesizing` | Generating answer |
+| `validating` | Checking citations |
+| `retrying_synthesis` | Retrying answer with feedback |
+| `success` | Final answer is good |
+| `best_effort` | Returning best available answer |
 
-### Navigator Tools
+### Node Functions
 
-1. **nav_search_title(query, top_k)**: Semantic search on section titles
-2. **nav_explore_titles(node_id, direction, radius)**: See titles around a node
-   - direction: "up" (earlier), "down" (later), "both"
-   - radius: nodes to explore (default based on scope)
-3. **nav_peek_content(node_id)**: Read node content preview
-4. **nav_mark_found(node_ids)**: Mark nodes as found
+| Function | Purpose |
+|----------|---------|
+| `init_loop()` | Initialize loop state |
+| `process_seed()` | Process one seed with adaptive radius |
+| `reflect()` | Evaluate progress, decide next action |
+| `check_evidence()` | Check if evidence is sufficient |
+| `retry_search()` | Expand scope and get more seeds |
+| `synthesize()` | Generate answer from evidence |
+| `validate()` | Check citations and quality |
+| `retry_synthesis()` | Retry with feedback about errors |
+| `exit_success()` | Return validated answer |
+| `exit_best_effort()` | Return best available answer |
 
-### Navigator Routing Logic
+## Key Features
 
+### 1. Adaptive Expansion Radius
+
+In `process_seed()`:
 ```python
-def route_navigator(state):
-    if status == "found":
-        return "exit_success"
-    if status == "failed":
-        return "exit_failure"
-    if status == "retry":
-        return "retry_broader"
-    if status == "verifying":
-        return "verify"
-    if iteration >= max_iter:
-        if scope_level < MAX_SCOPE_LEVEL:
-            return "retry_broader"
-        else:
-            return "exit_failure"
-    return "execute_tools"
-```
-
-### Critical Fixes in Navigator
-
-1. **Preserve "found" status**: `reflect()` now checks if status is already "found" and preserves it
-2. **Conditional verify routing**: `verify()` routes based on status (success → exit_success, failure → reflect)
-3. **Prevent status override**: Reflection no longer overrides successful verification
-
-## Agent State Structure
-
-```
-AgentState {
-    messages: List[BaseMessage]           # Conversation history
-    user_query: str                       # Original user question
-    title_collection: str                 # Title-indexed collection name
-    text_collection: str                  # Text-indexed collection name
-    final_answer: str                     # Final synthesized answer
-    plan: Dict[str, Any]                  # Planner output
-    validation: Dict[str, Any]            # Citation validation results
-
-    # Structural navigation state
-    structural_seeds: List[Dict[str, Any]]  # Nodes found via navigation
-
-    # Per-seed processing state
-    pending_seeds: List[Dict[str, Any]]   # Seeds waiting to be processed (max 5)
-    visited_node_ids: List[str]           # MEMORY: don't re-process nodes
-    evidence_pool: List[Dict[str, Any]]   # Accumulated relevant nodes (ranked)
-    processing_complete: bool             # True when all seeds processed
-}
-```
-
-## Key Optimizations
-
-### 1. Skip Semantic Search When Navigation Succeeds
-
-**Location**: `retrieve_seeds()`
-
-**Logic**:
-```python
-has_high_quality_structural = any(
-    s.get("relevance_grade") == "high" 
-    for s in structural_seeds
-)
-
-if has_high_quality_structural and structural_seeds:
-    # Skip semantic search - navigation already found perfect match
-    logger.info("High-quality structural seeds found, skipping semantic search")
+base_radius = scope["radius"]
+if seed_grade == "high":
+    radius = base_radius + 2  # Expand more around high-grade seeds
 else:
-    # Do semantic search to complement structural seeds
-    for query in subqueries:
-        results = search_by_text(query, ...)
+    radius = base_radius
 ```
 
-**Benefit**: Saves 5+ API calls when Navigator successfully finds the target
+### 2. Reflection After Each Seed
 
-### 2. Full Text for High-Grade Nodes
+```python
+RETRIEVAL_REFLECTION_PROMPT = """Evaluate retrieval progress.
 
-**Location**: `synthesize_answer()`
+QUERY: {query}
+SEEDS PROCESSED: {processed}/{total}
+EVIDENCE COLLECTED: {evidence_count} nodes
+  - High-grade: {high_count}
+  - Medium-grade: {medium_count}
+...
 
-**Logic**:
+Answer format: sufficient|action|reason
+"""
+```
+
+### 3. Evidence Sufficiency Check
+
+```python
+def is_evidence_sufficient(high_count, medium_count):
+    return (high_count >= 3) or 
+           (high_count >= 2 and medium_count >= 3) or 
+           (medium_count >= 8)
+```
+
+### 4. Early Exit on Excellent Evidence
+
+```python
+def should_early_exit(high_count, medium_count):
+    return (high_count >= 5) or 
+           (high_count >= 3 and medium_count >= 4)
+```
+
+### 5. Retry with Expanded Scope
+
+When evidence is insufficient:
+1. Increment scope_level (0 → 1 → 2)
+2. Get new seeds with larger top_k and max_seeds
+3. Reset iteration count
+4. Resume processing
+
+### 6. Synthesis Retry with Feedback
+
+```python
+feedback = f"""IMPORTANT CORRECTIONS NEEDED:
+Previous answer had {missing} sentences without citations.
+Invalid node IDs: {invalid}
+
+STRICT REQUIREMENTS:
+1. Every sentence MUST have [Node XXXX] citation
+2. Only use node IDs from the evidence provided
+"""
+```
+
+### 7. Full Text for High-Grade Nodes
+
 ```python
 if grade == "high":
     snippet = text  # Full text - no truncation
 else:
-    snippet = text[:5000]  # Increased from 1200 to 5000
-```
-
-**Benefit**: High-quality nodes (especially structural seeds) preserve complete context
-
-### 3. Navigator Status Preservation
-
-**Location**: `reflect()` in Navigator sub-graph
-
-**Logic**:
-```python
-if current_status == "found":
-    # Preserve "found" status - don't override
-    return {"status": "found", ...}
-```
-
-**Benefit**: Prevents successful verification from being overridden by reflection
-
-## Execution Flow Example
-
-```
-User Query: "What are the review questions at the end of Chapter 4?"
-
-1. Planner:
-   - Detects structural intent: chapter=4, position="end", keywords=["review", "questions"]
-   - Generates subqueries: ["chapter 4 review questions", ...]
-   - Sets top_k=8, radius=3, max_seeds=5
-
-2. Navigate:
-   - Structural intent detected → invoke Navigator sub-graph
-   - Navigator: parse_goal → "Find 'review questions' section in Chapter 4 near the end"
-   - Navigator: execute_tools → nav_search_title("Chapter 4")
-   - Navigator: execute_tools → nav_explore_titles(node_id="0200", direction="down")
-   - Navigator: execute_tools → nav_mark_found(["0219"])
-   - Navigator: verify → Node 0219 verified ✓
-   - Navigator: exit_success → Returns structural_seeds=[{node_id: "0219", relevance_grade: "high", ...}]
-
-3. Retrieve:
-   - Structural seeds: 1 node (0219) with relevance_grade="high"
-   - Check: has_high_quality_structural = True
-   - OPTIMIZATION: Skip semantic search (saves 5 API calls)
-   - Seeds: [0219] (1 structural, 0 semantic)
-
-4. Process Seed:
-   - Seed 0219: Grade = "high" ✓
-   - Expand around 0219: radius=3 → 6 neighbors
-   - Batch-grade neighbors: 2 relevant
-   - Evidence pool: [0219, neighbor1, neighbor2] (3 nodes)
-
-5. Synthesize:
-   - Evidence nodes: 2 high-grade nodes
-   - High-grade nodes: FULL text (no truncation)
-   - Generate answer with citations
-
-6. Validate:
-   - Check citation format
-   - Return final answer
-```
-
-## Grading Strategy
-
-### Individual Seed Grading
-```
-grade_single_node(node, query, llm)
-    │
-    ├─> Send ONE node to LLM
-    │   - Title + first 800 chars of text
-    │
-    ├─> LLM returns: high | medium | low | irrelevant
-    │
-    └─> Criteria:
-        - high: Directly answers or essential
-        - medium: Useful context
-        - low: Tangentially related
-        - irrelevant: Not related
-```
-
-### Batch Neighbor Grading
-```
-grade_neighbors_batch(neighbors, query, llm)
-    │
-    ├─> Send up to 15 neighbors in ONE LLM call
-    │   - Each with first 400 chars of text
-    │
-    ├─> LLM returns JSON array of grades
-    │
-    └─> Filter: Keep only high/medium grades
+    snippet = text[:5000]  # 5000 chars for medium
 ```
 
 ## Graph Structure
@@ -511,133 +422,120 @@ grade_neighbors_batch(neighbors, query, llm)
 Main StateGraph
 ├── Entry Point: "planner"
 ├── Nodes:
-│   ├── "planner" → planner() → generates retrieval plan + structural hints
+│   ├── "planner" → planner()
 │   ├── "navigate" → navigate_structure() → invokes Navigator sub-graph
-│   ├── "retrieve" → retrieve_seeds() → gets top 5 seeds (with optimization)
-│   ├── "process_seed" → process_seed() → grades & expands one seed
-│   ├── "synthesize" → synthesize_answer() → generates final answer (with full text for high-grade)
-│   └── "validate" → validate_citations() → checks citation format
+│   ├── "retrieve" → retrieve_seeds()
+│   └── "retrieval_loop" → run_retrieval_loop() → invokes RetrievalLoop sub-graph
 └── Edges:
     ├── planner → navigate
     ├── navigate → retrieve
-    ├── retrieve → process_seed
-    ├── process_seed → route_seed_processing → process_seed/synthesize
-    ├── synthesize → validate
-    └── validate → END
+    ├── retrieve → retrieval_loop
+    └── retrieval_loop → END
 
 Navigator Sub-graph (StateGraph)
 ├── Entry Point: "parse_goal"
-├── Nodes:
-│   ├── "parse_goal" → parse_goal() → builds natural language goal
-│   ├── "execute_tools" → execute_tools() → LLM calls navigation tools
-│   ├── "reflect" → reflect() → reflects on progress (preserves "found")
-│   ├── "verify" → verify() → verifies found nodes match goal
-│   ├── "retry_broader" → retry_broader() → expands scope and retries
-│   ├── "exit_success" → exit_success() → returns structural_seeds
-│   └── "exit_failure" → exit_failure() → returns empty seeds
-└── Edges:
-    ├── parse_goal → execute_tools
-    ├── execute_tools → reflect
-    ├── verify → route_navigator → exit_success/reflect/...
-    ├── reflect → route_navigator → execute_tools/verify/retry_broader/exit_success/exit_failure
-    ├── retry_broader → execute_tools
-    ├── exit_success → END
-    └── exit_failure → END
+├── Nodes: parse_goal, execute_tools, reflect, verify, retry_broader, exit_success, exit_failure
+└── Edges: (see Navigator flowchart above)
+
+RetrievalLoop Sub-graph (StateGraph)
+├── Entry Point: "init_loop"
+├── Nodes: init_loop, process_seed, reflect, check_evidence, retry_search, 
+│          synthesize, validate, retry_synthesis, exit_success, exit_best_effort
+└── Edges: (see RetrievalLoop flowchart above)
 ```
 
-## Data Flow
+## Execution Flow Example
 
 ```
-User Query
-    ↓
-Initial State (pending_seeds=[], evidence_pool=[], structural_seeds=[])
-    ↓
-Planner → Plan (subqueries, top_k=8, radius=3, max_seeds=5, structural_hints)
-    ↓
-Navigate → Navigator Sub-graph
-    ├─> parse_goal → goal: "Find 'review questions' in Chapter 4 near the end"
-    ├─> execute_tools → nav_search_title("Chapter 4")
-    ├─> execute_tools → nav_explore_titles("0200", direction="down")
-    ├─> execute_tools → nav_mark_found(["0219"])
-    ├─> verify → Node 0219 verified ✓
-    └─> exit_success → structural_seeds=[{node_id: "0219", relevance_grade: "high", ...}]
-    ↓
-Retrieve Seeds:
-    ├─> Add structural seeds: [0219]
-    ├─> Check: has_high_quality_structural = True
-    ├─> OPTIMIZATION: Skip semantic search ✓
-    └─> Seeds: [0219] (1 structural, 0 semantic)
-    ↓
-Process Seed 0219:
-    ├─> Grade: "high" → Expand → Grade neighbors → Add to evidence
-    └─> evidence_pool=[0219, neighbor1, neighbor2]
-    ↓
-Synthesize → Final Answer (with FULL text for high-grade nodes)
-    ↓
-Validate → Check citation format
-    ↓
-Result Dictionary (answer, messages, evidence_count)
+User Query: "What are the key concepts in photosynthesis?"
+
+1. Planner:
+   - Generates subqueries: ["photosynthesis key concepts", "light reactions", ...]
+   - Sets top_k=8, radius=3, max_seeds=5
+   - No structural intent detected
+
+2. Navigate:
+   - No structural intent → skip navigation
+   - Returns empty structural_seeds
+
+3. Retrieve:
+   - Semantic search with subqueries
+   - Selects top 5 seeds
+
+4. RetrievalLoop Sub-graph:
+   
+   init_loop:
+   - Initialize state with 5 seeds
+   
+   process_seed (seed 1):
+   - Grade: "high"
+   - Adaptive radius: 3 + 2 = 5
+   - Expand and grade neighbors
+   - Add to evidence pool
+   
+   reflect:
+   - high=2, medium=3
+   - Action: "continue"
+   
+   process_seed (seed 2):
+   - Grade: "medium"
+   - Radius: 3
+   - Add to evidence pool
+   
+   reflect:
+   - high=3, medium=5
+   - Early exit condition met!
+   - Action: "early_exit"
+   
+   check_evidence:
+   - Sufficient (high >= 3)
+   - Proceed to synthesis
+   
+   synthesize:
+   - Generate answer with full text for high-grade nodes
+   
+   validate:
+   - Citations OK
+   - Status: "success"
+   
+   exit_success:
+   - Return final answer
+
+5. Result:
+   - Answer with citations
+   - Evidence pool
+   - Validation results
 ```
 
-## Quick Reference Summary
+## Performance Characteristics
+
+- **Max Seeds per Scope**: 5 → 7 → 10
+- **Max Iterations per Scope**: 15
+- **Max Scope Levels**: 3 (focused → expanded → broad)
+- **Max Synthesis Retries**: 2
+- **Adaptive Radius**: +2 for high-grade seeds
+- **Total LLM Calls** (typical case):
+  - Planner: 1
+  - Navigator: 0-24 (if structural)
+  - RetrievalLoop: 2-4 per seed (grade + batch) + 1 reflect + 1 synthesize
+  - **Total**: ~10-30 calls (with early exit: as low as 5)
+
+## Quick Reference
 
 ### Main Functions
 
-| Function | Purpose | Key Responsibilities |
-|----------|---------|---------------------|
-| `query_agent()` | Entry point | Sets up state, creates agent, invokes workflow |
-| `create_agent()` | Graph builder | Initializes LLM, creates Navigator sub-graph, builds StateGraph |
-| `planner()` | Query planning | Generates subqueries, detects structural intent, sets parameters |
-| `navigate_structure()` | Navigation wrapper | Checks structural intent, invokes Navigator sub-graph |
-| `retrieve_seeds()` | Initial retrieval | **OPTIMIZATION**: Skips semantic search if high-quality structural seeds found |
-| `process_seed()` | Core loop | Grades seed, expands if relevant, grades neighbors |
-| `grade_single_node()` | Individual grading | Grades ONE node with LLM |
-| `grade_neighbors_batch()` | Batch grading | Grades multiple neighbors in one LLM call |
-| `synthesize_answer()` | Answer generation | **OPTIMIZATION**: Full text for high-grade nodes, 5000 chars for medium |
-| `validate_citations()` | Quality check | Validates citation format (no retry) |
+| Function | Location | Purpose |
+|----------|----------|---------|
+| `query_agent()` | Entry point | Sets up and runs the agent |
+| `create_agent()` | Graph builder | Creates both sub-graphs and main graph |
+| `run_retrieval_loop()` | Wrapper | Invokes RetrievalLoop sub-graph |
+| `navigate_structure()` | Wrapper | Invokes Navigator sub-graph |
 
-### Navigator Functions
+### Optimizations
 
-| Function | Purpose | Key Responsibilities |
-|----------|---------|---------------------|
-| `parse_goal()` | Goal builder | Converts structural hints into natural language goal |
-| `execute_tools()` | Tool executor | LLM calls navigation tools, tracks state |
-| `reflect()` | Progress reflection | **FIX**: Preserves "found" status |
-| `verify()` | Node verification | Verifies found nodes match goal, routes conditionally |
-| `retry_broader()` | Scope expansion | Expands scope level and retries |
-| `exit_success()` | Success handler | Returns structural_seeds with relevance_grade="high" |
-| `exit_failure()` | Failure handler | Returns empty structural_seeds |
-
-### Termination Conditions
-
-```
-Main Agent Termination:
-├─> All seeds processed → processing_complete = True → Synthesize
-└─> No seeds retrieved → processing_complete = True → Synthesize (empty)
-
-Navigator Termination:
-├─> Verification succeeded → status="found" → exit_success
-├─> Max iterations reached + max scope → status="failed" → exit_failure
-└─> Scope expansion exhausted → status="failed" → exit_failure
-```
-
-### Performance Characteristics
-
-- **Max Seeds**: 5 (configurable via planner)
-- **Expansion Radius**: 3 nodes in each direction
-- **LLM Calls per Seed**: 1 (individual grade) + 1 (batch grade neighbors) = 2 max
-- **Navigator Max Iterations**: 8 per scope level
-- **Navigator Scope Levels**: 3 (narrow → medium → broad)
-- **Total LLM Calls**: 
-  - Planner: 1
-  - Navigator: 1-24 (depends on success/failure)
-  - Seeds: 10 max (5 seeds × 2)
-  - Synthesize: 1
-  - **Total**: 13-36 calls (optimized: can be as low as 4 if Navigator succeeds immediately)
-
-### Optimizations Summary
-
-1. **Skip Semantic Search**: When Navigator finds high-quality structural seeds, skip semantic search (saves 5+ API calls)
-2. **Full Text for High-Grade**: High-grade nodes get full text in synthesis (no truncation)
-3. **Status Preservation**: Navigator preserves "found" status to prevent override
-4. **Conditional Routing**: Navigator routes verify results conditionally (success → exit, failure → retry)
+1. **Skip semantic search**: When Navigator finds high-quality structural seeds
+2. **Early exit**: When excellent evidence is found (5+ high or 3+ high + 4+ medium)
+3. **Adaptive radius**: High-grade seeds get +2 expansion radius
+4. **Full text for high-grade**: No truncation for high-quality nodes
+5. **Scope expansion**: Automatic retry with broader parameters if evidence insufficient
+6. **Synthesis retry**: Feedback-driven retry for citation issues
