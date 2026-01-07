@@ -257,6 +257,29 @@ def create_retrieval_loop_subgraph(
                 "reflection": f"Early exit: Excellent evidence collected (high={high_count}, medium={medium_count})",
             }
 
+        # Check if evidence is already sufficient (before asking LLM)
+        if is_evidence_sufficient(high_count, medium_count):
+            logger.info(f"[RETRIEVAL_LOOP] reflect: Evidence sufficient (high={high_count}, medium={medium_count}), proceeding to check")
+            return {
+                "status": "checking_evidence",
+                "reflection": f"Evidence sufficient (high={high_count}, medium={medium_count}), proceeding to synthesis",
+            }
+
+        # Special case: If we have a high-grade seed and all seeds are processed (or only 1 seed),
+        # and we have at least 1 high + 2 medium, consider it sufficient for structural queries
+        # This handles cases where navigator found exact match and we've expanded around it
+        evidence_pool = state.get("evidence_pool") or []
+        has_structural_seed = any(
+            e.get("source") == "structural" and e.get("relevance_grade") == "high"
+            for e in evidence_pool
+        )
+        if has_structural_seed and high_count >= 1 and medium_count >= 2 and (not pending_seeds or total_seeds == 1):
+            logger.info(f"[RETRIEVAL_LOOP] reflect: High-grade structural match found with sufficient context (high={high_count}, medium={medium_count}), proceeding to check")
+            return {
+                "status": "checking_evidence",
+                "reflection": f"High-grade structural match with context (high={high_count}, medium={medium_count}), proceeding to synthesis",
+            }
+
         # Check if all seeds processed
         if not pending_seeds:
             logger.info(f"[RETRIEVAL_LOOP] reflect: All seeds processed, checking evidence")
@@ -336,8 +359,19 @@ def create_retrieval_loop_subgraph(
         high_count = state.get("high_grade_count", 0)
         medium_count = state.get("medium_grade_count", 0)
         scope_level = state.get("scope_level", 0)
+        evidence_pool = state.get("evidence_pool") or []
 
         sufficient = is_evidence_sufficient(high_count, medium_count)
+
+        # Special case: High-grade structural seed with context is sufficient
+        # This handles cases where navigator found exact match (e.g., "chapter 4 review questions")
+        has_structural_seed = any(
+            e.get("source") == "structural" and e.get("relevance_grade") == "high"
+            for e in evidence_pool
+        )
+        if not sufficient and has_structural_seed and high_count >= 1 and medium_count >= 2:
+            logger.info(f"[RETRIEVAL_LOOP] check_evidence: High-grade structural match with context (high={high_count}, medium={medium_count}), considering sufficient")
+            sufficient = True
 
         logger.info(f"[RETRIEVAL_LOOP] check_evidence: high={high_count}, medium={medium_count}, sufficient={sufficient}")
 

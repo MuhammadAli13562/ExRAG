@@ -12,9 +12,20 @@ from __future__ import annotations
 from dataclasses import dataclass
 from contextlib import contextmanager
 from typing import Any, Dict, Iterator, Optional, List, Mapping
+from pathlib import Path
 import os
 import re
 import time
+
+# Load .env file from project root if it exists
+try:
+    from dotenv import load_dotenv
+    _env_path = Path(__file__).parent.parent.parent / ".env"
+    if _env_path.exists():
+        load_dotenv(_env_path)
+except ImportError:
+    # dotenv not installed, skip .env loading
+    pass
 
 
 _SECRET_KEY_RE = re.compile(r"(?i)(api[_-]?key|secret|token|bearer)")
