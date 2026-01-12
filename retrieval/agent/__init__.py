@@ -153,7 +153,13 @@ def create_agent(
     
     # Create node functions
     planner = create_planner(llm, tracer, AGENT_MODEL)
-    navigate_structure = create_navigate_structure(navigator_subgraph, tracer)
+    # Pass retrieval_tools for deterministic navigation (Anthropic: "start simple")
+    navigate_structure = create_navigate_structure(
+        navigator_subgraph, 
+        tracer, 
+        retrieval_tools=retrieval_tools, 
+        text_collection=text_collection
+    )
     retrieve_seeds = create_retrieve_seeds(retrieval_tools, text_collection, tracer)
     run_retrieval_loop = create_run_retrieval_loop(retrieval_loop_subgraph, text_collection, tracer)
     

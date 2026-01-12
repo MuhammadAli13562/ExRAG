@@ -64,6 +64,8 @@ class RetrievalLoopState(TypedDict):
     subqueries: List[str]
     text_collection: str
     initial_seeds: List[Dict[str, Any]]        # Seeds from retrieve_seeds
+    query_type: str                            # "structural", "conceptual", or "hybrid"
+    route: str                                 # "structural_only", "semantic_only", or "hybrid"
     
     # Processing state
     pending_seeds: List[Dict[str, Any]]        # Seeds waiting to be processed

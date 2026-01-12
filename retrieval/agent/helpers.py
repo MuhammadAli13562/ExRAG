@@ -12,6 +12,9 @@ def detect_structural_intent(query: str) -> Dict[str, Any]:
     """
     Detect structural patterns in a query: chapter refs, position hints, section keywords.
 
+    NOTE: This is a legacy function kept for backwards compatibility.
+    The planner now uses LLM-based detection which is more accurate.
+
     Args:
         query: The user's query
 
@@ -22,68 +25,79 @@ def detect_structural_intent(query: str) -> Dict[str, Any]:
             - position: str or None - "end" or "beginning"
             - section_keywords: List[str] - detected section type keywords
     """
-    hints: Dict[str, Any] = {
+    # Return empty hints - the planner now handles this with LLM
+    return {
         "has_structural": False,
         "chapter": None,
         "position": None,
         "section_keywords": [],
     }
 
-    query_lower = query.lower()
 
-    # Detect chapter reference (e.g., "chapter 4", "ch. 12", "chapter4")
-    chapter_match = re.search(r'(?:chapter|ch\.?)\s*(\d+)', query_lower)
-    if chapter_match:
-        hints["chapter"] = int(chapter_match.group(1))
-        hints["has_structural"] = True
-
-    # Detect position hints
-    if any(p in query_lower for p in ["end of", "at the end", "last", "final", "concluding"]):
-        hints["position"] = "end"
-        hints["has_structural"] = True
-    elif any(p in query_lower for p in ["beginning of", "at the beginning", "start of", "first", "intro", "opening"]):
-        hints["position"] = "beginning"
-        hints["has_structural"] = True
-
-    # Detect section type keywords
-    section_keywords = [
-        "review", "questions", "summary", "critical thinking",
-        "key terms", "introduction", "exercises", "problems",
-        "glossary", "vocabulary", "objectives", "learning outcomes",
-        "test yourself", "self-assessment", "quiz", "practice"
-    ]
-    for kw in section_keywords:
-        if kw in query_lower:
-            hints["section_keywords"].append(kw)
-            hints["has_structural"] = True
-
-    if hints["has_structural"]:
-        logger.info(f"[STRUCTURAL] Detected structural intent: chapter={hints['chapter']}, "
-                    f"position={hints['position']}, keywords={hints['section_keywords']}")
-
-    return hints
-
-
-def is_evidence_sufficient(high_count: int, medium_count: int) -> bool:
+def is_evidence_sufficient(
+    high_count: int, 
+    medium_count: int, 
+    query_type: str = "conceptual",
+    route: str = "semantic_only"
+) -> bool:
     """
     Check if we have sufficient evidence for synthesis.
     
-    Sufficient if:
-    - 3+ high-grade nodes, OR
-    - 2+ high + 3+ medium, OR
-    - 8+ medium (for broad queries)
+    Anthropic principle: Use explicit criteria based on query type
+    instead of always asking LLM "is this enough?"
+    
+    Args:
+        high_count: Number of high-grade evidence nodes
+        medium_count: Number of medium-grade evidence nodes
+        query_type: "structural", "conceptual", or "hybrid"
+        route: "structural_only", "semantic_only", or "hybrid"
+    
+    Returns:
+        True if evidence is sufficient for synthesis
     """
+    # Structural queries (specific section lookup) need fewer nodes
+    if query_type == "structural" or route == "structural_only":
+        # Found the exact section we were looking for
+        return high_count >= 1 or (high_count >= 0 and medium_count >= 2)
+    
+    # Hybrid queries need moderate coverage
+    if query_type == "hybrid" or route == "hybrid":
+        return (high_count >= 2) or (high_count >= 1 and medium_count >= 3)
+    
+    # Conceptual queries need broader coverage
+    # (original thresholds for backward compatibility)
     return (high_count >= 3) or (high_count >= 2 and medium_count >= 3) or (medium_count >= 8)
 
 
-def should_early_exit(high_count: int, medium_count: int) -> bool:
+def should_early_exit(
+    high_count: int, 
+    medium_count: int,
+    query_type: str = "conceptual",
+    route: str = "semantic_only"
+) -> bool:
     """
     Check if we have excellent evidence and can skip remaining seeds.
     
-    Early exit if:
-    - 5+ high-grade nodes, OR
-    - 3+ high + 4+ medium
+    Anthropic principle: Set clear stopping points to control costs.
+    
+    Args:
+        high_count: Number of high-grade evidence nodes
+        medium_count: Number of medium-grade evidence nodes
+        query_type: "structural", "conceptual", or "hybrid"
+        route: "structural_only", "semantic_only", or "hybrid"
+    
+    Returns:
+        True if we should exit early with current evidence
     """
+    # Structural queries: exit early once we find the target
+    if query_type == "structural" or route == "structural_only":
+        return high_count >= 2 or (high_count >= 1 and medium_count >= 2)
+    
+    # Hybrid: slightly lower bar than conceptual
+    if query_type == "hybrid" or route == "hybrid":
+        return (high_count >= 3) or (high_count >= 2 and medium_count >= 3)
+    
+    # Conceptual: need more evidence before early exit
     return (high_count >= 5) or (high_count >= 3 and medium_count >= 4)
 
 

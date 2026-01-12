@@ -249,17 +249,25 @@ def create_retrieval_loop_subgraph(
         iteration = state.get("iteration", 0)
         max_iterations = state.get("max_iterations", RETRIEVAL_MAX_ITERATIONS)
 
+        # Get query context for evidence thresholds
+        query_type = state.get("query_type", "conceptual")
+        route = state.get("route", "semantic_only")
+        
         # Check for early exit condition (excellent evidence)
-        if should_early_exit(high_count, medium_count):
-            logger.info(f"[RETRIEVAL_LOOP] reflect: Early exit - excellent evidence (high={high_count}, medium={medium_count})")
+        # Anthropic principle: "Set clear stopping points to control costs"
+        if should_early_exit(high_count, medium_count, query_type, route):
+            logger.info(f"[RETRIEVAL_LOOP] reflect: Early exit - excellent evidence "
+                       f"(high={high_count}, medium={medium_count}, route={route})")
             return {
                 "status": "checking_evidence",
                 "reflection": f"Early exit: Excellent evidence collected (high={high_count}, medium={medium_count})",
             }
 
         # Check if evidence is already sufficient (before asking LLM)
-        if is_evidence_sufficient(high_count, medium_count):
-            logger.info(f"[RETRIEVAL_LOOP] reflect: Evidence sufficient (high={high_count}, medium={medium_count}), proceeding to check")
+        # Anthropic principle: "Use explicit criteria instead of always asking LLM"
+        if is_evidence_sufficient(high_count, medium_count, query_type, route):
+            logger.info(f"[RETRIEVAL_LOOP] reflect: Evidence sufficient "
+                       f"(high={high_count}, medium={medium_count}, route={route}), proceeding to check")
             return {
                 "status": "checking_evidence",
                 "reflection": f"Evidence sufficient (high={high_count}, medium={medium_count}), proceeding to synthesis",
@@ -355,13 +363,17 @@ def create_retrieval_loop_subgraph(
     def check_evidence(state: RetrievalLoopState) -> Dict[str, Any]:
         """
         Check if evidence is sufficient for synthesis.
+        
+        Anthropic principle: Use explicit thresholds based on query type.
         """
         high_count = state.get("high_grade_count", 0)
         medium_count = state.get("medium_grade_count", 0)
         scope_level = state.get("scope_level", 0)
         evidence_pool = state.get("evidence_pool") or []
+        query_type = state.get("query_type", "conceptual")
+        route = state.get("route", "semantic_only")
 
-        sufficient = is_evidence_sufficient(high_count, medium_count)
+        sufficient = is_evidence_sufficient(high_count, medium_count, query_type, route)
 
         # Special case: High-grade structural seed with context is sufficient
         # This handles cases where navigator found exact match (e.g., "chapter 4 review questions")
@@ -373,7 +385,8 @@ def create_retrieval_loop_subgraph(
             logger.info(f"[RETRIEVAL_LOOP] check_evidence: High-grade structural match with context (high={high_count}, medium={medium_count}), considering sufficient")
             sufficient = True
 
-        logger.info(f"[RETRIEVAL_LOOP] check_evidence: high={high_count}, medium={medium_count}, sufficient={sufficient}")
+        logger.info(f"[RETRIEVAL_LOOP] check_evidence: high={high_count}, medium={medium_count}, "
+                   f"route={route}, sufficient={sufficient}")
 
         if sufficient or scope_level >= MAX_RETRIEVAL_SCOPE:
             # Proceed to synthesis (either sufficient or max scope reached)

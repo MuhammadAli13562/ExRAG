@@ -37,13 +37,19 @@ def create_run_retrieval_loop(retrieval_loop_subgraph, text_collection: str, tra
 
         logger.info(f"[RETRIEVAL_LOOP] Starting with {len(pending_seeds)} seeds")
 
-        with tracer.span("run_retrieval_loop", input={"num_seeds": len(pending_seeds)}) as span:
+        # Extract query_type and route for evidence sufficiency thresholds
+        query_type = plan.get("query_type", "conceptual")
+        route = plan.get("route", "semantic_only")
+        
+        with tracer.span("run_retrieval_loop", input={"num_seeds": len(pending_seeds), "route": route}) as span:
             # Build RetrievalLoopState input
             loop_input: Dict[str, Any] = {
                 "user_query": state["user_query"],
                 "subqueries": plan.get("subqueries", [state["user_query"]]),
                 "text_collection": text_collection,
                 "initial_seeds": pending_seeds,
+                "query_type": query_type,  # Pass for evidence threshold tuning
+                "route": route,            # Pass for evidence threshold tuning
                 "pending_seeds": [],
                 "visited_node_ids": [],
                 "evidence_pool": [],

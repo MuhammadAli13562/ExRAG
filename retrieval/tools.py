@@ -622,6 +622,284 @@ class RetrievalTools:
                     span.update(output={"error": str(e)})
                 raise RuntimeError(f"Node exploration failed: {e}")
     
+    def get_chapter_info(
+        self,
+        chapter_num: int,
+        collection_name: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Get chapter boundaries and section list.
+        
+        This enables deterministic structural navigation without LLM loops.
+        (Anthropic best practice: clear Agent-Computer Interface)
+        
+        Args:
+            chapter_num: Chapter number to look up
+            collection_name: Name of the collection
+            
+        Returns:
+            {
+                "chapter": 4,
+                "title": "Chapter 4: Cell Division",
+                "start_idx": 100,
+                "end_idx": 150,
+                "start_node": "0100",
+                "end_node": "0150",
+                "num_nodes": 51,
+                "sections": [
+                    {"node_id": "0101", "title": "4.1 Introduction", "level": 2},
+                    ...
+                ]
+            }
+            or None if chapter not found
+        """
+        import re
+        from .langfuse_tracing import get_tracer
+        
+        tracer = get_tracer()
+        with tracer.span(
+            "tool.get_chapter_info",
+            input={"chapter_num": chapter_num, "collection_name": collection_name},
+        ) as span:
+            try:
+                nodes = self._load_json_from_collection(collection_name)
+                
+                # Find chapter start
+                chapter_start_idx = None
+                chapter_title = None
+                
+                # Patterns to match chapter headers
+                chapter_patterns = [
+                    rf"^chapter\s+{chapter_num}\b",      # "Chapter 4" or "Chapter 4:"
+                    rf"^ch\.?\s*{chapter_num}\b",        # "Ch. 4" or "Ch 4"
+                    rf"^{chapter_num}\.\s",              # "4. Title"
+                ]
+                
+                for idx, node in enumerate(nodes):
+                    title = (node.get("title") or "").strip()
+                    title_lower = title.lower()
+                    
+                    for pattern in chapter_patterns:
+                        if re.match(pattern, title_lower):
+                            chapter_start_idx = idx
+                            chapter_title = title
+                            break
+                    
+                    if chapter_start_idx is not None:
+                        break
+                
+                if chapter_start_idx is None:
+                    logger.info(f"[TOOLS] get_chapter_info: Chapter {chapter_num} not found")
+                    if span is not None:
+                        span.update(output={"found": False})
+                    return None
+                
+                # Find next chapter start (to determine end boundary)
+                chapter_end_idx = len(nodes)
+                next_chapter = chapter_num + 1
+                
+                next_chapter_patterns = [
+                    rf"^chapter\s+{next_chapter}\b",
+                    rf"^ch\.?\s*{next_chapter}\b",
+                    rf"^{next_chapter}\.\s",
+                ]
+                
+                for idx in range(chapter_start_idx + 1, len(nodes)):
+                    title = (nodes[idx].get("title") or "").strip()
+                    title_lower = title.lower()
+                    
+                    for pattern in next_chapter_patterns:
+                        if re.match(pattern, title_lower):
+                            chapter_end_idx = idx
+                            break
+                    
+                    if chapter_end_idx != len(nodes):
+                        break
+                
+                # Extract sections within chapter
+                sections = []
+                for idx in range(chapter_start_idx, chapter_end_idx):
+                    node = nodes[idx]
+                    node_title = node.get("title") or ""
+                    if node_title.strip():  # Only include nodes with titles
+                        sections.append({
+                            "node_id": node.get("node_id"),
+                            "title": node_title,
+                            "level": node.get("level", 1),
+                            "idx": idx,
+                        })
+                
+                result = {
+                    "chapter": chapter_num,
+                    "title": chapter_title,
+                    "start_idx": chapter_start_idx,
+                    "end_idx": chapter_end_idx,
+                    "start_node": nodes[chapter_start_idx].get("node_id"),
+                    "end_node": nodes[chapter_end_idx - 1].get("node_id") if chapter_end_idx > 0 else None,
+                    "num_nodes": chapter_end_idx - chapter_start_idx,
+                    "sections": sections,
+                }
+                
+                logger.info(f"[TOOLS] get_chapter_info: Found chapter {chapter_num} "
+                           f"(nodes {chapter_start_idx}-{chapter_end_idx}, {len(sections)} sections)")
+                
+                if span is not None:
+                    span.update(output={
+                        "found": True,
+                        "start_idx": chapter_start_idx,
+                        "end_idx": chapter_end_idx,
+                        "num_sections": len(sections),
+                    })
+                
+                return result
+                
+            except Exception as e:
+                logger.error(f"[TOOLS] get_chapter_info failed: {e}", exc_info=True)
+                if span is not None:
+                    span.update(output={"error": str(e)})
+                return None
+
+    def navigate_structural_deterministic(
+        self,
+        collection_name: str,
+        chapter: Optional[int] = None,
+        position: Optional[str] = None,  # "beginning" | "end" | None
+        keywords: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Deterministic structural navigation - no LLM loop needed.
+        
+        This implements Anthropic's "prompt chaining" principle:
+        break tasks into clear, sequential steps.
+        
+        Steps:
+        1. Find chapter landmark (if specified)
+        2. Get chapter boundaries
+        3. Filter by position (beginning/end)
+        4. Match keywords within filtered range
+        
+        Args:
+            collection_name: Name of the collection
+            chapter: Chapter number to search within (optional)
+            position: "beginning", "end", or None for full chapter
+            keywords: Keywords to match in titles/text
+            
+        Returns:
+            List of matching nodes with structural metadata
+        """
+        from .langfuse_tracing import get_tracer
+        
+        tracer = get_tracer()
+        with tracer.span(
+            "tool.navigate_structural_deterministic",
+            input={"chapter": chapter, "position": position, "keywords": keywords},
+        ) as span:
+            logger.info(f"[TOOLS] Deterministic nav: chapter={chapter}, position={position}, keywords={keywords}")
+            
+            try:
+                nodes = self._load_json_from_collection(collection_name)
+                
+                # Step 1 & 2: Get chapter boundaries
+                if chapter is not None:
+                    chapter_info = self.get_chapter_info(chapter, collection_name)
+                    if chapter_info is None:
+                        logger.warning(f"[TOOLS] Chapter {chapter} not found")
+                        if span is not None:
+                            span.update(output={"found": 0, "reason": "chapter_not_found"})
+                        return []
+                    
+                    start_idx = chapter_info["start_idx"]
+                    end_idx = chapter_info["end_idx"]
+                    chapter_nodes = nodes[start_idx:end_idx]
+                else:
+                    # No chapter specified - search entire document
+                    chapter_nodes = nodes
+                    start_idx = 0
+                    end_idx = len(nodes)
+                
+                # Step 3: Filter by position
+                if position == "end":
+                    # Last 25% of chapter or last 30 nodes, whichever is smaller
+                    cutoff = max(len(chapter_nodes) - 30, int(len(chapter_nodes) * 0.75))
+                    search_range = chapter_nodes[cutoff:]
+                    position_offset = cutoff
+                elif position == "beginning":
+                    # First 25% of chapter or first 30 nodes, whichever is smaller
+                    cutoff = min(30, int(len(chapter_nodes) * 0.25))
+                    search_range = chapter_nodes[:cutoff]
+                    position_offset = 0
+                else:
+                    search_range = chapter_nodes
+                    position_offset = 0
+                
+                logger.info(f"[TOOLS] Search range: {len(search_range)} nodes "
+                           f"(position={position}, offset={position_offset})")
+                
+                # Step 4: Match keywords
+                matches = []
+                keywords_lower = [kw.lower() for kw in (keywords or [])]
+                
+                for node in search_range:
+                    title = (node.get("title") or "").lower()
+                    text = (node.get("text") or "").lower()
+                    
+                    # If no keywords, return all nodes in range (for pure position queries)
+                    if not keywords_lower:
+                        matches.append({
+                            **node,
+                            "source": "structural",
+                            "relevance_grade": "high",
+                            "match_type": "position_only",
+                        })
+                        continue
+                    
+                    # Check keyword match
+                    matched_keywords = []
+                    for kw in keywords_lower:
+                        if kw in title:
+                            matched_keywords.append(kw)
+                        elif kw in text[:500]:  # Check first 500 chars of text
+                            matched_keywords.append(kw)
+                    
+                    if matched_keywords:
+                        # Score based on match quality
+                        title_match = any(kw in title for kw in matched_keywords)
+                        grade = "high" if title_match else "medium"
+                        
+                        matches.append({
+                            **node,
+                            "source": "structural",
+                            "relevance_grade": grade,
+                            "match_type": "keyword",
+                            "matched_keywords": matched_keywords,
+                        })
+                
+                # Sort: title matches first, then by document order
+                matches.sort(key=lambda x: (
+                    0 if x.get("relevance_grade") == "high" else 1,
+                    nodes.index(x) if x in nodes else 999999,
+                ))
+                
+                # Limit results
+                matches = matches[:10]
+                
+                logger.info(f"[TOOLS] Deterministic nav found {len(matches)} matches")
+                
+                if span is not None:
+                    span.update(output={
+                        "found": len(matches),
+                        "node_ids": [m.get("node_id") for m in matches],
+                        "grades": [m.get("relevance_grade") for m in matches],
+                    })
+                
+                return matches
+                
+            except Exception as e:
+                logger.error(f"[TOOLS] navigate_structural_deterministic failed: {e}", exc_info=True)
+                if span is not None:
+                    span.update(output={"error": str(e)})
+                return []
+
     def list_collections(self) -> List[Dict[str, Any]]:
         """
         List all available collections with their metadata.
