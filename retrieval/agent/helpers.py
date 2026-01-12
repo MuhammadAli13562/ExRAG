@@ -8,32 +8,6 @@ from typing import Dict, Any, List, Tuple
 logger = logging.getLogger(__name__)
 
 
-def detect_structural_intent(query: str) -> Dict[str, Any]:
-    """
-    Detect structural patterns in a query: chapter refs, position hints, section keywords.
-
-    NOTE: This is a legacy function kept for backwards compatibility.
-    The planner now uses LLM-based detection which is more accurate.
-
-    Args:
-        query: The user's query
-
-    Returns:
-        Dict with keys:
-            - has_structural: bool - whether structural navigation should be used
-            - chapter: int or None - chapter number if mentioned
-            - position: str or None - "end" or "beginning"
-            - section_keywords: List[str] - detected section type keywords
-    """
-    # Return empty hints - the planner now handles this with LLM
-    return {
-        "has_structural": False,
-        "chapter": None,
-        "position": None,
-        "section_keywords": [],
-    }
-
-
 def is_evidence_sufficient(
     high_count: int, 
     medium_count: int, 

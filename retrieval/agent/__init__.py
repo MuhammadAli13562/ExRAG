@@ -45,7 +45,6 @@ from .prompts import (
     SYSTEM_PROMPT,
 )
 from .helpers import (
-    detect_structural_intent,
     is_evidence_sufficient,
     should_early_exit,
     count_evidence_grades,
@@ -88,7 +87,6 @@ __all__ = [
     'SYSTEM_PROMPT',
     
     # Helpers
-    'detect_structural_intent',
     'is_evidence_sufficient',
     'should_early_exit',
     'count_evidence_grades',
