@@ -1,541 +1,828 @@
-# Retrieval Agent Architecture Flowchart
+# ExRAG Retrieval Agent Architecture
 
 ## Overview
-This document visualizes the LangGraph-based agentic retrieval system with **two ReAct-style sub-graphs**:
-1. **Navigator Sub-graph**: For structural document navigation (chapter/section finding)
-2. **RetrievalLoop Sub-graph**: For ReAct-style seed processing with reflection, adaptation, and retry
 
-## Main Agent Flowchart
+This document visualizes the **Anthropic-style agentic retrieval system** with:
+1. **Routing-based Planner**: Routes queries to appropriate handlers
+2. **Deterministic Navigation**: Fast structural navigation without LLM loops
+3. **Navigator Sub-graph**: LLM-based navigation for complex cases
+4. **RetrievalLoop Sub-graph**: ReAct-style seed processing with reflection
 
-```mermaid
-flowchart TD
-    Start([UserQuery]) --> QueryAgent[query_agent]
-    QueryAgent --> CreateAgent[create_agent]
-    CreateAgent --> Planner[planner]
-    Planner --> Navigate[navigate_structure]
-    
-    Navigate -->|has_structural| NavigatorSubgraph[Navigator Sub-graph]
-    Navigate -->|no structural| Retrieve[retrieve_seeds]
-    NavigatorSubgraph -->|structural_seeds| Retrieve
-    
-    Retrieve -->|seeds| RetrievalLoop[RetrievalLoop Sub-graph]
-    
-    subgraph RetrievalLoopBox["RetrievalLoop Sub-graph"]
-        direction TB
-        InitLoop[init_loop] --> ProcessSeed[process_seed]
-        ProcessSeed --> Reflect[reflect]
-        Reflect -->|continue| ProcessSeed
-        Reflect -->|early_exit/all_processed| CheckEvidence[check_evidence]
-        CheckEvidence -->|sufficient| Synthesize[synthesize]
-        CheckEvidence -->|insufficient| RetrySearch[retry_search]
-        RetrySearch --> ProcessSeed
-        Synthesize --> Validate[validate]
-        Validate -->|ok| ExitSuccess[exit_success]
-        Validate -->|retry| RetrySynthesis[retry_synthesis]
-        Validate -->|acceptable| ExitBest[exit_best_effort]
-        RetrySynthesis --> Synthesize
-    end
-    
-    RetrievalLoop --> DoneNode([Done])
-```
+---
 
-## Navigator Sub-graph Flowchart
-
-```mermaid
-flowchart TD
-    StartNav([Navigator Input]) --> ParseGoal[parse_goal]
-    ParseGoal --> ExecuteTools[execute_tools]
-    ExecuteTools --> NavReflect[reflect]
-    
-    NavReflect -->|status=found| NavExitSuccess[exit_success]
-    NavReflect -->|status=verifying| Verify[verify]
-    NavReflect -->|status=retry| RetryBroader[retry_broader]
-    NavReflect -->|status=searching| ExecuteTools
-    NavReflect -->|status=failed| NavExitFailure[exit_failure]
-    
-    Verify -->|status=found| NavExitSuccess
-    Verify -->|status=searching| NavReflect
-    
-    RetryBroader --> ExecuteTools
-    
-    NavExitSuccess --> EndNav([Return structural_seeds])
-    NavExitFailure --> EndNav
-```
-
-## RetrievalLoop Sub-graph Flowchart (Detailed)
-
-```mermaid
-flowchart TD
-    StartLoop([RetrievalLoop Input]) --> InitLoop[init_loop]
-    InitLoop --> ProcessSeed[process_seed]
-    ProcessSeed --> Reflect[reflect]
-    
-    Reflect -->|continue| ProcessSeed
-    Reflect -->|early_exit| CheckEvidence[check_evidence]
-    Reflect -->|all_processed| CheckEvidence
-    
-    CheckEvidence -->|sufficient| Synthesize[synthesize]
-    CheckEvidence -->|insufficient| RetrySearch[retry_search]
-    
-    RetrySearch -->|retries_left| ProcessSeed
-    RetrySearch -->|max_retries| Synthesize
-    
-    Synthesize --> Validate[validate]
-    
-    Validate -->|ok| ExitSuccess[exit_success]
-    Validate -->|poor| RetrySynthesis[retry_synthesis]
-    Validate -->|acceptable| ExitBest[exit_best_effort]
-    
-    RetrySynthesis --> Synthesize
-    
-    ExitSuccess --> EndLoop([Return Result])
-    ExitBest --> EndLoop
-```
-
-## Complete State Machine
-
-```mermaid
-stateDiagram-v2
-    [*] --> Planner
-    
-    Planner --> Navigate
-    
-    state NavigatorSubgraph {
-        [*] --> ParseGoal
-        ParseGoal --> ExecuteTools
-        ExecuteTools --> NavReflect
-        NavReflect --> Verify: verifying
-        NavReflect --> NavRetryBroader: retry
-        NavReflect --> ExecuteTools: searching
-        NavReflect --> NavExitSuccess: found
-        NavReflect --> NavExitFailure: failed
-        Verify --> NavExitSuccess: found
-        Verify --> NavReflect: searching
-        NavRetryBroader --> ExecuteTools
-        NavExitSuccess --> [*]
-        NavExitFailure --> [*]
-    }
-    
-    Navigate --> NavigatorSubgraph: has_structural
-    Navigate --> Retrieve: no_structural
-    NavigatorSubgraph --> Retrieve: structural_seeds
-    
-    state RetrievalLoopSubgraph {
-        [*] --> InitLoop
-        InitLoop --> ProcessSeed
-        ProcessSeed --> LoopReflect
-        LoopReflect --> ProcessSeed: continue
-        LoopReflect --> CheckEvidence: early_exit/all_processed
-        CheckEvidence --> Synthesize: sufficient
-        CheckEvidence --> RetrySearch: insufficient
-        RetrySearch --> ProcessSeed: retries_left
-        RetrySearch --> Synthesize: max_retries
-        Synthesize --> Validate
-        Validate --> ExitSuccess: ok
-        Validate --> RetrySynthesis: poor
-        Validate --> ExitBestEffort: acceptable
-        RetrySynthesis --> Synthesize
-        ExitSuccess --> [*]
-        ExitBestEffort --> [*]
-    }
-    
-    Retrieve --> RetrievalLoopSubgraph
-    RetrievalLoopSubgraph --> [*]
-    
-    note right of Planner
-        LLM produces JSON plan
-        + structural_hints detection
-    end note
-    
-    note right of RetrievalLoopSubgraph
-        ReAct-style processing:
-        - Reflection after each seed
-        - Adaptive expansion radius
-        - Evidence sufficiency check
-        - Scope expansion retry
-        - Synthesis retry with feedback
-    end note
-```
-
-## Detailed Flow Diagram
+## 🎯 High-Level Architecture
 
 ```
-                    START
-                     │
-                     ▼
-        ┌────────────────────────┐
-        │  query_agent() called   │
-        │  - user_query           │
-        │  - title_collection     │
-        │  - text_collection      │
-        └────────────┬────────────┘
-                     │
-                     ▼
-        ┌────────────────────────┐
-        │  create_agent()         │
-        │  - Initialize ChatOpenAI│
-        │  - Create Navigator     │
-        │    Sub-graph            │
-        │  - Create RetrievalLoop │
-        │    Sub-graph            │
-        │  - Build StateGraph     │
-        └────────────┬────────────┘
-                     │
-                     ▼
-        ┌────────────────────────┐
-        │   PLANNER               │
-        │   - Generate subqueries │
-        │   - Set top_k, radius   │
-        │   - Detect structural   │
-        │     intent              │
-        └────────────┬────────────┘
-                     │
-                     ▼
-        ┌────────────────────────┐
-        │   NAVIGATE_STRUCTURE    │
-        │   (Navigator Sub-graph) │
-        │                         │
-        │   Returns:              │
-        │   structural_seeds      │
-        └────────────┬────────────┘
-                     │
-                     ▼
-        ┌────────────────────────┐
-        │   RETRIEVE_SEEDS        │
-        │                         │
-        │   - Add structural      │
-        │     seeds               │
-        │   - Skip semantic if    │
-        │     high-quality        │
-        │   - Select seeds        │
-        └────────────┬────────────┘
-                     │
-                     ▼
-        ┌────────────────────────────────────────────────────────────┐
-        │                 RETRIEVAL LOOP SUB-GRAPH                    │
-        │                                                             │
-        │   ┌─────────────────────────────────────────────────────┐  │
-        │   │  init_loop → process_seed → reflect                  │  │
-        │   │       │                          │                   │  │
-        │   │       │        ┌─────────────────┘                   │  │
-        │   │       │        │                                     │  │
-        │   │       │        ▼                                     │  │
-        │   │       │    ┌───────────┐                             │  │
-        │   │       │    │ continue? │──YES──┐                     │  │
-        │   │       │    └───────────┘       │                     │  │
-        │   │       │        │               │                     │  │
-        │   │       │       NO               │                     │  │
-        │   │       │        ▼               │                     │  │
-        │   │       │   check_evidence       │                     │  │
-        │   │       │        │               │                     │  │
-        │   │       │   ┌────┴────┐          │                     │  │
-        │   │       │   │         │          │                     │  │
-        │   │       │   ▼         ▼          │                     │  │
-        │   │       │ sufficient  insufficient                     │  │
-        │   │       │   │         │          │                     │  │
-        │   │       │   │    retry_search    │                     │  │
-        │   │       │   │         │          │                     │  │
-        │   │       │   │         └──────────┘                     │  │
-        │   │       │   ▼                                          │  │
-        │   │       │ synthesize                                   │  │
-        │   │       │   │                                          │  │
-        │   │       │   ▼                                          │  │
-        │   │       │ validate                                     │  │
-        │   │       │   │                                          │  │
-        │   │       │   ├───ok──────► exit_success                 │  │
-        │   │       │   ├───acceptable─► exit_best_effort          │  │
-        │   │       │   └───poor────► retry_synthesis ─┐           │  │
-        │   │       │                                  │           │  │
-        │   │       │                    synthesize ◄──┘           │  │
-        │   │       └──────────────────────────────────────────────┘  │
-        └────────────────────────────┬───────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                              ExRAG RETRIEVAL AGENT                                  │
+│                    (Anthropic Best Practices Implementation)                        │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                     │
+│   ┌─────────────┐                                                                   │
+│   │ User Query  │                                                                   │
+│   └──────┬──────┘                                                                   │
+│          │                                                                          │
+│          ▼                                                                          │
+│   ┌─────────────────────────────────────────────────────────────────────────────┐   │
+│   │                           PLANNER (with Routing)                            │   │
+│   │  • Detect structural intent (chapter, position, keywords)                   │   │
+│   │  • Classify query type: structural | conceptual | hybrid                    │   │
+│   │  • Route to: structural_only | semantic_only | hybrid                       │   │
+│   └─────────────────────────────────┬───────────────────────────────────────────┘   │
+│                                     │                                               │
+│          ┌──────────────────────────┼──────────────────────────┐                    │
+│          │                          │                          │                    │
+│          ▼                          ▼                          ▼                    │
+│   ┌─────────────┐          ┌─────────────────┐          ┌─────────────┐             │
+│   │ STRUCTURAL  │          │     HYBRID      │          │  SEMANTIC   │             │
+│   │    ONLY     │          │                 │          │    ONLY     │             │
+│   │             │          │  Deterministic  │          │             │             │
+│   │Deterministic│          │       +         │          │   Skip      │             │
+│   │ Navigation  │          │ LLM Navigator   │          │ Navigation  │             │
+│   └──────┬──────┘          └────────┬────────┘          └──────┬──────┘             │
+│          │                          │                          │                    │
+│          └──────────────────────────┼──────────────────────────┘                    │
+│                                     │                                               │
+│                                     ▼                                               │
+│   ┌─────────────────────────────────────────────────────────────────────────────┐   │
+│   │                          RETRIEVE SEEDS                                     │   │
+│   │  • Merge structural + semantic seeds                                        │   │
+│   │  • Skip semantic search if high-quality structural seeds found              │   │
+│   │  • Select top seeds (max 5)                                                 │   │
+│   └─────────────────────────────────┬───────────────────────────────────────────┘   │
+│                                     │                                               │
+│                                     ▼                                               │
+│   ┌─────────────────────────────────────────────────────────────────────────────┐   │
+│   │                       RETRIEVAL LOOP SUB-GRAPH                              │   │
+│   │  • Process seeds with adaptive expansion                                    │   │
+│   │  • Reflect on progress (query-aware thresholds)                             │   │
+│   │  • Synthesize answer with citations                                         │   │
+│   │  • Validate and retry if needed                                             │   │
+│   └─────────────────────────────────┬───────────────────────────────────────────┘   │
+│                                     │                                               │
+│                                     ▼                                               │
+│   ┌─────────────┐                                                                   │
+│   │   Answer    │                                                                   │
+│   │ + Citations │                                                                   │
+│   └─────────────┘                                                                   │
+│                                                                                     │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 🔄 Complete Flow Diagram
+
+```
+                                    START
+                                      │
+                                      ▼
+                    ┌─────────────────────────────────┐
+                    │         query_agent()            │
+                    │  ┌─────────────────────────┐    │
+                    │  │ Input:                  │    │
+                    │  │ • user_query            │    │
+                    │  │ • title_collection      │    │
+                    │  │ • text_collection       │    │
+                    │  └─────────────────────────┘    │
+                    └───────────────┬─────────────────┘
+                                    │
+                                    ▼
+┌───────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                    │
+│                              ┌──────────────────┐                                  │
+│                              │     PLANNER      │                                  │
+│                              │                  │                                  │
+│                              │  LLM analyzes    │                                  │
+│                              │  query to detect │                                  │
+│                              │  structural      │                                  │
+│                              │  intent          │                                  │
+│                              └────────┬─────────┘                                  │
+│                                       │                                            │
+│                    ┌──────────────────┼──────────────────┐                        │
+│                    │                  │                  │                        │
+│                    ▼                  ▼                  ▼                        │
+│          ┌─────────────────┐  ┌─────────────┐  ┌─────────────────┐               │
+│          │   STRUCTURAL    │  │   HYBRID    │  │    SEMANTIC     │               │
+│          │     ONLY        │  │             │  │      ONLY       │               │
+│          │                 │  │             │  │                 │               │
+│          │ chapter=8       │  │ chapter=4   │  │ no structural   │               │
+│          │ position=end    │  │ query about │  │ hints           │               │
+│          │ keywords=       │  │ "mitosis"   │  │                 │               │
+│          │   [review]      │  │             │  │                 │               │
+│          └────────┬────────┘  └──────┬──────┘  └────────┬────────┘               │
+│                   │                  │                  │                        │
+│                   ▼                  ▼                  ▼                        │
+│          ┌─────────────────┐  ┌─────────────┐  ┌─────────────────┐               │
+│          │  DETERMINISTIC  │  │  LLM-BASED  │  │      SKIP       │               │
+│          │   NAVIGATION    │  │  NAVIGATOR  │  │   NAVIGATION    │               │
+│          │                 │  │  SUB-GRAPH  │  │                 │               │
+│          │ No LLM calls!   │  │             │  │ Go straight to  │               │
+│          │ O(1) lookup     │  │ ReAct loop  │  │ semantic search │               │
+│          └────────┬────────┘  └──────┬──────┘  └────────┬────────┘               │
+│                   │                  │                  │                        │
+│                   └──────────────────┼──────────────────┘                        │
+│                                      │                                           │
+│                                      ▼                                           │
+│                         ┌────────────────────────┐                               │
+│                         │    RETRIEVE SEEDS      │                               │
+│                         │                        │                               │
+│                         │ If high-quality        │                               │
+│                         │ structural seeds:      │                               │
+│                         │ → Skip semantic search │                               │
+│                         │                        │                               │
+│                         │ Otherwise:             │                               │
+│                         │ → Merge both sources   │                               │
+│                         └───────────┬────────────┘                               │
+│                                     │                                            │
+│                                     ▼                                            │
+│    ┌────────────────────────────────────────────────────────────────────────┐   │
+│    │                     RETRIEVAL LOOP SUB-GRAPH                            │   │
+│    │                                                                         │   │
+│    │   ┌─────────┐    ┌──────────────┐    ┌───────────┐                     │   │
+│    │   │  init   │───▶│ process_seed │───▶│  reflect  │                     │   │
+│    │   │  loop   │    │              │    │           │                     │   │
+│    │   └─────────┘    │ • grade seed │    │ Query-    │                     │   │
+│    │                  │ • adaptive   │    │ aware     │                     │   │
+│    │                  │   radius     │    │ thresholds│                     │   │
+│    │                  │ • expand &   │    │           │                     │   │
+│    │                  │   grade      │    └─────┬─────┘                     │   │
+│    │                  │   neighbors  │          │                           │   │
+│    │                  └──────────────┘          │                           │   │
+│    │                         ▲                  │                           │   │
+│    │                         │                  ▼                           │   │
+│    │                         │         ┌───────────────┐                    │   │
+│    │                  continue?───YES──│ More seeds?   │                    │   │
+│    │                                   └───────┬───────┘                    │   │
+│    │                                           │ NO                         │   │
+│    │                                           ▼                            │   │
+│    │                                   ┌───────────────┐                    │   │
+│    │                                   │check_evidence │                    │   │
+│    │                                   └───────┬───────┘                    │   │
+│    │                                           │                            │   │
+│    │                            ┌──────────────┴──────────────┐             │   │
+│    │                            │                             │             │   │
+│    │                            ▼                             ▼             │   │
+│    │                    ┌───────────────┐            ┌──────────────┐       │   │
+│    │                    │  SUFFICIENT   │            │ INSUFFICIENT │       │   │
+│    │                    │               │            │              │       │   │
+│    │                    │ structural:   │            │ retry_search │       │   │
+│    │                    │  1 high       │            │ (expand      │       │   │
+│    │                    │ conceptual:   │            │  scope)      │       │   │
+│    │                    │  3 high OR    │            └──────────────┘       │   │
+│    │                    │  2h + 3m      │                                   │   │
+│    │                    └───────┬───────┘                                   │   │
+│    │                            │                                           │   │
+│    │                            ▼                                           │   │
+│    │                    ┌───────────────┐                                   │   │
+│    │                    │  synthesize   │                                   │   │
+│    │                    │               │                                   │   │
+│    │                    │ Generate      │                                   │   │
+│    │                    │ answer with   │                                   │   │
+│    │                    │ [Node XXXX]   │                                   │   │
+│    │                    │ citations     │                                   │   │
+│    │                    └───────┬───────┘                                   │   │
+│    │                            │                                           │   │
+│    │                            ▼                                           │   │
+│    │                    ┌───────────────┐                                   │   │
+│    │                    │   validate    │                                   │   │
+│    │                    └───────┬───────┘                                   │   │
+│    │                            │                                           │   │
+│    │              ┌─────────────┼─────────────┐                             │   │
+│    │              │             │             │                             │   │
+│    │              ▼             ▼             ▼                             │   │
+│    │         ┌────────┐   ┌──────────┐   ┌─────────┐                       │   │
+│    │         │   OK   │   │ACCEPTABLE│   │  POOR   │                       │   │
+│    │         └────┬───┘   └────┬─────┘   └────┬────┘                       │   │
+│    │              │            │              │                             │   │
+│    │              ▼            ▼              ▼                             │   │
+│    │         exit_success  exit_best    retry_synthesis                    │   │
+│    │                       _effort      (with feedback)                    │   │
+│    │                                                                        │   │
+│    └────────────────────────────────────────────────────────────────────────┘   │
+│                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────┘
+                                      │
+                                      ▼
+                              ┌───────────────┐
+                              │    RESULT     │
+                              │               │
+                              │ • answer      │
+                              │ • evidence    │
+                              │ • citations   │
+                              └───────────────┘
+```
+
+---
+
+## 🧭 Navigation Strategy Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                           NAVIGATION DECISION TREE                               │
+└─────────────────────────────────────────────────────────────────────────────────┘
+
+                         User Query
+                             │
+                             ▼
+                    ┌─────────────────┐
+                    │ Planner detects │
+                    │ structural      │
+                    │ intent?         │
+                    └────────┬────────┘
+                             │
+              ┌──────────────┼──────────────┐
+              │              │              │
+              ▼              ▼              ▼
+        ┌──────────┐   ┌──────────┐   ┌──────────┐
+        │   YES    │   │  PARTIAL │   │    NO    │
+        │          │   │          │   │          │
+        │ chapter  │   │ keywords │   │ pure     │
+        │ + keywords│   │ only     │   │ concept  │
+        │ + position│   │          │   │          │
+        └────┬─────┘   └────┬─────┘   └────┬─────┘
+             │              │              │
+             ▼              ▼              ▼
+        ┌──────────┐   ┌──────────┐   ┌──────────┐
+        │STRUCTURAL│   │  HYBRID  │   │ SEMANTIC │
+        │  ONLY    │   │          │   │   ONLY   │
+        └────┬─────┘   └────┬─────┘   └────┬─────┘
+             │              │              │
+             ▼              ▼              ▼
+    ┌────────────────┐  ┌────────────────┐  ┌────────────────┐
+    │ DETERMINISTIC  │  │ DETERMINISTIC  │  │     SKIP       │
+    │ NAVIGATION     │  │ + LLM FALLBACK │  │  NAVIGATION    │
+    │                │  │                │  │                │
+    │ 1. get_chapter │  │ 1. Try         │  │ Go directly to │
+    │    _info()     │  │    deterministic│  │ semantic search│
+    │ 2. Filter by   │  │ 2. If fails,   │  │                │
+    │    position    │  │    use LLM     │  │                │
+    │ 3. Match       │  │    navigator   │  │                │
+    │    keywords    │  │                │  │                │
+    │                │  │                │  │                │
+    │ ⚡ NO LLM CALLS│  │ ~1-8 LLM calls │  │ ⚡ NO LLM CALLS│
+    │ ~10ms          │  │ ~5-30 seconds  │  │ ~0ms           │
+    └────────────────┘  └────────────────┘  └────────────────┘
+```
+
+---
+
+## 📊 Deterministic Navigation Flow
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                    DETERMINISTIC STRUCTURAL NAVIGATION                           │
+│                    (navigate_structural_deterministic)                           │
+└─────────────────────────────────────────────────────────────────────────────────┘
+
+ Input: chapter=8, position="end", keywords=["review", "questions"]
+
+                    Step 1: GET CHAPTER INFO
+                    ┌─────────────────────────────┐
+                    │ get_chapter_info(8)          │
+                    │                              │
+                    │ Returns:                     │
+                    │ {                            │
+                    │   chapter: 8,                │
+                    │   start_idx: 331,            │
+                    │   end_idx: 368,              │
+                    │   num_nodes: 37,             │
+                    │   sections: [...]            │
+                    │ }                            │
+                    └──────────────┬──────────────┘
+                                   │
+                                   ▼
+                    Step 2: FILTER BY POSITION
+                    ┌─────────────────────────────┐
+                    │ position = "end"             │
+                    │                              │
+                    │ Full chapter: nodes 331-368  │
+                    │ ────────────────────────────│
+                    │ [331] Chapter 8 header       │
+                    │ [332] Section 8.1            │
+                    │ [333] ...                    │
+                    │ ...                          │
+                    │ [358] ─────────────────────  │
+                    │ [359] │ Last 10 nodes │ ◄── position="end"
+                    │ [360] │ searched here │      │
+                    │ [361] │               │      │
+                    │ [362] │ Review        │      │
+                    │ [363] │ Questions     │      │
+                    │ [364] │               │      │
+                    │ [365] │               │      │
+                    │ [366] │               │      │
+                    │ [367] │               │      │
+                    │ [368] └───────────────┘      │
+                    └──────────────┬──────────────┘
+                                   │
+                                   ▼
+                    Step 3: MATCH KEYWORDS
+                    ┌─────────────────────────────┐
+                    │ keywords = ["review",        │
+                    │             "questions"]     │
+                    │                              │
+                    │ Scan titles & text for:      │
+                    │ • "review" in title? ✓ HIGH  │
+                    │ • "questions" in title? ✓    │
+                    │ • keywords in text? MEDIUM   │
+                    │                              │
+                    │ Found 3 matches!             │
+                    └──────────────┬──────────────┘
+                                   │
+                                   ▼
+                    Step 4: RETURN RESULTS
+                    ┌─────────────────────────────┐
+                    │ Returns:                     │
+                    │ [                            │
+                    │   {node_id: "0366",          │
+                    │    title: "Review Questions",│
+                    │    relevance_grade: "high",  │
+                    │    source: "structural"},    │
+                    │   {node_id: "0367", ...},    │
+                    │   {node_id: "0368", ...}     │
+                    │ ]                            │
+                    │                              │
+                    │ ⚡ Total time: ~10ms         │
+                    │ ⚡ LLM calls: 0              │
+                    └─────────────────────────────┘
+```
+
+---
+
+## 🔁 Navigator Sub-graph (LLM-based)
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                       NAVIGATOR SUB-GRAPH (for hybrid queries)                   │
+│                             ReAct-style tool calling                             │
+└─────────────────────────────────────────────────────────────────────────────────┘
+
+                              ┌─────────────┐
+                              │ parse_goal  │
+                              │             │
+                              │ Build NL    │
+                              │ goal from   │
+                              │ hints       │
+                              └──────┬──────┘
                                      │
                                      ▼
-                           ┌──────────────┐
-                           │      END      │
-                           │   Return:     │
-                           │   - answer    │
-                           │   - evidence  │
-                           │   - validation│
-                           └───────────────┘
+              ┌─────────────────────────────────────────┐
+              │              execute_tools              │
+              │                                         │
+              │  Available tools:                       │
+              │  • nav_search_title(query, top_k)       │
+              │  • nav_explore_titles(node_id, dir)     │
+              │  • nav_peek_content(node_id)            │
+              │  • nav_mark_found(node_ids)             │
+              │                                         │
+              │  LLM decides which tool to call         │
+              └───────────────────┬─────────────────────┘
+                                  │
+                                  ▼
+              ┌─────────────────────────────────────────┐
+              │                reflect                   │
+              │                                         │
+              │  Evaluate progress:                     │
+              │  • Making progress? (yes/no/uncertain)  │
+              │  • Next action? (continue/verify/       │
+              │                  expand_scope/give_up)  │
+              └───────────────────┬─────────────────────┘
+                                  │
+            ┌─────────────────────┼─────────────────────┐
+            │                     │                     │
+            ▼                     ▼                     ▼
+    ┌───────────────┐    ┌───────────────┐    ┌───────────────┐
+    │   searching   │    │   verifying   │    │    retry      │
+    │               │    │               │    │               │
+    │ Continue      │    │ Check if      │    │ Expand scope  │
+    │ exploring     │    │ candidates    │    │ and restart   │
+    └───────┬───────┘    │ match goal    │    └───────────────┘
+            │            └───────┬───────┘
+            │                    │
+            ▼                    ▼
+    execute_tools ◄──────   ┌───────────────┐
+                            │    verify     │
+                            │               │
+                            │ Check keyword │
+                            │ matches in    │
+                            │ found nodes   │
+                            └───────┬───────┘
+                                    │
+                         ┌──────────┴──────────┐
+                         │                     │
+                         ▼                     ▼
+                 ┌───────────────┐    ┌───────────────┐
+                 │    found      │    │   not found   │
+                 │               │    │               │
+                 │ exit_success  │    │ Continue      │
+                 │               │    │ searching     │
+                 └───────────────┘    └───────────────┘
 ```
 
-## RetrievalLoop Sub-graph Details
+---
 
-### RetrievalLoopState
+## 📈 Evidence Thresholds by Query Type
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                      QUERY-AWARE EVIDENCE THRESHOLDS                             │
+│                      (Anthropic: "Use explicit criteria")                        │
+└─────────────────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────┬────────────────────────────────┬────────────────────────────┐
+│    Query Type    │      is_evidence_sufficient    │       should_early_exit    │
+├──────────────────┼────────────────────────────────┼────────────────────────────┤
+│                  │                                │                            │
+│   STRUCTURAL     │  high ≥ 1                      │  high ≥ 2                  │
+│   (route:        │       OR                       │       OR                   │
+│  structural_only)│  medium ≥ 2                    │  high ≥ 1 AND medium ≥ 2   │
+│                  │                                │                            │
+│  "Chapter 8      │  ✓ Found the exact section    │  ✓ Found section + context │
+│   review         │    we were looking for         │                            │
+│   questions"     │                                │                            │
+│                  │                                │                            │
+├──────────────────┼────────────────────────────────┼────────────────────────────┤
+│                  │                                │                            │
+│     HYBRID       │  high ≥ 2                      │  high ≥ 3                  │
+│   (route:        │       OR                       │       OR                   │
+│    hybrid)       │  high ≥ 1 AND medium ≥ 3       │  high ≥ 2 AND medium ≥ 3   │
+│                  │                                │                            │
+│  "Explain        │  ✓ Found section + enough      │  ✓ Good coverage           │
+│   mitosis from   │    conceptual context          │                            │
+│   chapter 4"     │                                │                            │
+│                  │                                │                            │
+├──────────────────┼────────────────────────────────┼────────────────────────────┤
+│                  │                                │                            │
+│   CONCEPTUAL     │  high ≥ 3                      │  high ≥ 5                  │
+│   (route:        │       OR                       │       OR                   │
+│  semantic_only)  │  high ≥ 2 AND medium ≥ 3       │  high ≥ 3 AND medium ≥ 4   │
+│                  │       OR                       │                            │
+│                  │  medium ≥ 8                    │                            │
+│                  │                                │                            │
+│  "What is        │  ✓ Need broad coverage of      │  ✓ Excellent evidence      │
+│   photosynthesis?│    the concept                 │    collected               │
+│   "              │                                │                            │
+│                  │                                │                            │
+└──────────────────┴────────────────────────────────┴────────────────────────────┘
+```
+
+---
+
+## 🔄 RetrievalLoop Sub-graph
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                         RETRIEVAL LOOP SUB-GRAPH                                 │
+│                         ReAct-style seed processing                              │
+└─────────────────────────────────────────────────────────────────────────────────┘
+
+                        ┌────────────────┐
+                        │   init_loop    │
+                        │                │
+                        │ Initialize:    │
+                        │ • pending_seeds│
+                        │ • evidence_pool│
+                        │ • scope_level=0│
+                        └───────┬────────┘
+                                │
+                                ▼
+                 ┌──────────────────────────────┐
+                 │        process_seed          │
+                 │                              │
+                 │ 1. Pop seed from pending     │
+                 │ 2. Grade seed (LLM call)     │
+                 │                              │
+                 │ If low-grade:                │
+                 │   → Skip to next seed        │
+                 │                              │
+                 │ If high/medium:              │
+                 │   3. Calculate radius        │
+                 │      high: base + 2          │
+                 │      medium: base            │
+                 │   4. Expand around seed      │
+                 │   5. Grade neighbors (batch) │
+                 │   6. Add to evidence_pool    │
+                 └──────────────┬───────────────┘
+                                │
+                                ▼
+                 ┌──────────────────────────────┐
+                 │           reflect            │
+                 │                              │
+                 │ Check query-aware thresholds:│
+                 │                              │
+                 │ structural_only?             │
+                 │   → 1 high is enough         │
+                 │                              │
+                 │ conceptual?                  │
+                 │   → Need 3 high OR 2h+3m     │
+                 │                              │
+                 │ Early exit if excellent      │
+                 │ evidence found               │
+                 └──────────────┬───────────────┘
+                                │
+              ┌─────────────────┼─────────────────┐
+              │                 │                 │
+              ▼                 ▼                 ▼
+        ┌───────────┐    ┌───────────┐    ┌───────────┐
+        │ continue  │    │ sufficient│    │insufficient│
+        │           │    │           │    │           │
+        │ More      │    │ check_    │    │ retry_    │
+        │ seeds     │    │ evidence  │    │ search    │
+        │ remain    │    │           │    │           │
+        └─────┬─────┘    └─────┬─────┘    └─────┬─────┘
+              │                │                 │
+              │                │                 │
+              ▼                ▼                 ▼
+        process_seed    synthesize      ┌───────────────┐
+                                        │ Expand scope  │
+                                        │               │
+                                        │ scope 0→1→2   │
+                                        │ focused →     │
+                                        │ expanded →    │
+                                        │ broad         │
+                                        │               │
+                                        │ Get new seeds │
+                                        │ with higher   │
+                                        │ top_k         │
+                                        └───────┬───────┘
+                                                │
+                                                ▼
+                                          process_seed
+
+
+                 ┌──────────────────────────────┐
+                 │          synthesize          │
+                 │                              │
+                 │ Build evidence context:      │
+                 │ • Full text for high-grade   │
+                 │ • 5000 chars for medium      │
+                 │                              │
+                 │ Generate answer with         │
+                 │ [Node XXXX] citations        │
+                 └──────────────┬───────────────┘
+                                │
+                                ▼
+                 ┌──────────────────────────────┐
+                 │           validate           │
+                 │                              │
+                 │ Check:                       │
+                 │ • Every sentence has citation│
+                 │ • All node IDs are valid     │
+                 │ • Answer is non-empty        │
+                 └──────────────┬───────────────┘
+                                │
+              ┌─────────────────┼─────────────────┐
+              │                 │                 │
+              ▼                 ▼                 ▼
+        ┌───────────┐    ┌───────────┐    ┌───────────┐
+        │    OK     │    │ ACCEPTABLE│    │   POOR    │
+        │           │    │           │    │           │
+        │ exit_     │    │ exit_best │    │ retry_    │
+        │ success   │    │ _effort   │    │ synthesis │
+        │           │    │           │    │           │
+        │ Return    │    │ Return    │    │ Add       │
+        │ validated │    │ best      │    │ feedback  │
+        │ answer    │    │ answer    │    │ → retry   │
+        └───────────┘    └───────────┘    └─────┬─────┘
+                                                │
+                                                ▼
+                                          synthesize
+                                          (with feedback)
+```
+
+---
+
+## 📋 State Definitions
+
+### AgentState (Main Graph)
 
 ```python
-class RetrievalLoopState(TypedDict):
-    # Input from parent
+class AgentState(TypedDict):
+    messages: List[BaseMessage]
     user_query: str
-    subqueries: List[str]
+    title_collection: str
     text_collection: str
-    initial_seeds: List[Dict[str, Any]]
-    
-    # Processing state
-    pending_seeds: List[Dict[str, Any]]
-    visited_node_ids: List[str]
-    evidence_pool: List[Dict[str, Any]]
-    
-    # Loop control
-    iteration: int
-    max_iterations: int                    # 15 per scope
-    scope_level: int                       # 0=focused, 1=expanded, 2=broad
-    status: str                            # processing|reflecting|checking|...
-    seeds_processed: int
-    total_seeds: int
-    
-    # Reflection state
-    reflection: str
-    last_action: str
-    high_grade_count: int
-    medium_grade_count: int
-    
-    # Synthesis state
     final_answer: str
-    synthesis_attempts: int                # Max 2 retries
+    plan: Dict[str, Any]          # Contains: route, query_type, structural_hints
     validation: Dict[str, Any]
-    synthesis_feedback: str
-    
-    # Output
-    result: Dict[str, Any]
+    structural_seeds: List[Dict]   # From navigator
+    pending_seeds: List[Dict]      # For retrieval loop
+    visited_node_ids: List[str]
+    evidence_pool: List[Dict]
+    processing_complete: bool
 ```
 
-### Scope Levels
+### Plan Structure
 
 ```python
-RETRIEVAL_SCOPE_PARAMS = {
-    0: {"top_k": 8,  "radius": 3, "max_seeds": 5,  "name": "focused"},
-    1: {"top_k": 12, "radius": 5, "max_seeds": 7,  "name": "expanded"},
-    2: {"top_k": 16, "radius": 7, "max_seeds": 10, "name": "broad"},
+plan = {
+    "route": "structural_only" | "semantic_only" | "hybrid",
+    "query_type": "structural" | "conceptual" | "hybrid",
+    "has_structural": bool,
+    "structural_hints": {
+        "chapter": int | None,
+        "position": "beginning" | "end" | None,
+        "section_keywords": ["review", "questions", ...],
+        "has_structural": bool,
+    },
+    "search_query": "stripped query for semantic search",
+    "subqueries": ["search_query"],
+    "top_k": 8,
+    "radius": 3,
+    "max_seeds": 5,
 }
 ```
 
-### Status Values
+---
 
-| Status | Description |
-|--------|-------------|
-| `processing` | Processing seeds |
-| `reflecting` | Evaluating progress |
-| `checking_evidence` | Checking if evidence is sufficient |
-| `retrying_search` | Retrying with broader scope |
-| `synthesizing` | Generating answer |
-| `validating` | Checking citations |
-| `retrying_synthesis` | Retrying answer with feedback |
-| `success` | Final answer is good |
-| `best_effort` | Returning best available answer |
+## ⚡ Performance Comparison
 
-### Node Functions
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                          PERFORMANCE COMPARISON                                 │
+└─────────────────────────────────────────────────────────────────────────────────┘
 
-| Function | Purpose |
-|----------|---------|
-| `init_loop()` | Initialize loop state |
-| `process_seed()` | Process one seed with adaptive radius |
-| `reflect()` | Evaluate progress, decide next action |
-| `check_evidence()` | Check if evidence is sufficient |
-| `retry_search()` | Expand scope and get more seeds |
-| `synthesize()` | Generate answer from evidence |
-| `validate()` | Check citations and quality |
-| `retry_synthesis()` | Retry with feedback about errors |
-| `exit_success()` | Return validated answer |
-| `exit_best_effort()` | Return best available answer |
-
-## Key Features
-
-### 1. Adaptive Expansion Radius
-
-In `process_seed()`:
-```python
-base_radius = scope["radius"]
-if seed_grade == "high":
-    radius = base_radius + 2  # Expand more around high-grade seeds
-else:
-    radius = base_radius
+┌──────────────────────┬─────────────────────────┬─────────────────────────────────┐
+│       Metric         │    Before (LLM-based)   │   After (Anthropic-style)       │
+├──────────────────────┼─────────────────────────┼─────────────────────────────────┤
+│                      │                         │                                 │
+│ Structural Query     │ • Navigator: 8-24 calls │ • Deterministic: 0 LLM calls    │
+│ Navigation Time      │ • Time: 15-45 seconds   │ • Time: ~10ms                   │
+│                      │ • Unpredictable         │ • Predictable                   │
+│                      │                         │                                 │
+├──────────────────────┼─────────────────────────┼─────────────────────────────────┤
+│                      │                         │                                 │
+│ Conceptual Query     │ • Always runs navigator │ • Skips navigation entirely     │
+│ Navigation Time      │ • Time: 3-10 seconds    │ • Time: ~0ms                    │
+│                      │   (even if no results)  │                                 │
+│                      │                         │                                 │
+├──────────────────────┼─────────────────────────┼─────────────────────────────────┤
+│                      │                         │                                 │
+│ Evidence Check       │ • Same thresholds for   │ • Query-aware thresholds        │
+│                      │   all query types       │ • Structural: 1 high enough     │
+│                      │ • Often over-retrieves  │ • Conceptual: needs coverage    │
+│                      │                         │                                 │
+├──────────────────────┼─────────────────────────┼─────────────────────────────────┤
+│                      │                         │                                 │
+│ API Calls            │ • Planner: 1            │ • Planner: 1                    │
+│ (Structural Query)   │ • Navigator: 8-24       │ • Navigator: 0 (deterministic)  │
+│                      │ • Retrieval: 10-30      │ • Retrieval: 5-15               │
+│                      │ • Total: 20-55          │ • Total: 6-16                   │
+│                      │                         │                                 │
+├──────────────────────┼─────────────────────────┼─────────────────────────────────┤
+│                      │                         │                                 │
+│ Total Time           │ • Structural: 30-90s    │ • Structural: 10-25s            │
+│                      │ • Conceptual: 20-60s    │ • Conceptual: 15-40s            │
+│                      │                         │                                 │
+└──────────────────────┴─────────────────────────┴─────────────────────────────────┘
 ```
 
-### 2. Reflection After Each Seed
+---
 
-```python
-RETRIEVAL_REFLECTION_PROMPT = """Evaluate retrieval progress.
-
-QUERY: {query}
-SEEDS PROCESSED: {processed}/{total}
-EVIDENCE COLLECTED: {evidence_count} nodes
-  - High-grade: {high_count}
-  - Medium-grade: {medium_count}
-...
-
-Answer format: sufficient|action|reason
-"""
-```
-
-### 3. Evidence Sufficiency Check
-
-```python
-def is_evidence_sufficient(high_count, medium_count):
-    return (high_count >= 3) or 
-           (high_count >= 2 and medium_count >= 3) or 
-           (medium_count >= 8)
-```
-
-### 4. Early Exit on Excellent Evidence
-
-```python
-def should_early_exit(high_count, medium_count):
-    return (high_count >= 5) or 
-           (high_count >= 3 and medium_count >= 4)
-```
-
-### 5. Retry with Expanded Scope
-
-When evidence is insufficient:
-1. Increment scope_level (0 → 1 → 2)
-2. Get new seeds with larger top_k and max_seeds
-3. Reset iteration count
-4. Resume processing
-
-### 6. Synthesis Retry with Feedback
-
-```python
-feedback = f"""IMPORTANT CORRECTIONS NEEDED:
-Previous answer had {missing} sentences without citations.
-Invalid node IDs: {invalid}
-
-STRICT REQUIREMENTS:
-1. Every sentence MUST have [Node XXXX] citation
-2. Only use node IDs from the evidence provided
-"""
-```
-
-### 7. Full Text for High-Grade Nodes
-
-```python
-if grade == "high":
-    snippet = text  # Full text - no truncation
-else:
-    snippet = text[:5000]  # 5000 chars for medium
-```
-
-## Graph Structure
+## 🏗️ Graph Structure Summary
 
 ```
 Main StateGraph
 ├── Entry Point: "planner"
 ├── Nodes:
-│   ├── "planner" → planner()
-│   ├── "navigate" → navigate_structure() → invokes Navigator sub-graph
+│   ├── "planner" → planner() 
+│   │   └── Detects intent, sets route
+│   ├── "navigate" → navigate_structure()
+│   │   ├── route=structural_only → deterministic navigation
+│   │   ├── route=hybrid → LLM navigator sub-graph  
+│   │   └── route=semantic_only → skip (return [])
 │   ├── "retrieve" → retrieve_seeds()
-│   └── "retrieval_loop" → run_retrieval_loop() → invokes RetrievalLoop sub-graph
+│   │   └── Merges structural + semantic seeds
+│   └── "retrieval_loop" → run_retrieval_loop()
+│       └── Invokes RetrievalLoop sub-graph
 └── Edges:
     ├── planner → navigate
-    ├── navigate → retrieve
+    ├── navigate → retrieve  
     ├── retrieve → retrieval_loop
     └── retrieval_loop → END
 
-Navigator Sub-graph (StateGraph)
+Navigator Sub-graph (for hybrid queries)
 ├── Entry Point: "parse_goal"
-├── Nodes: parse_goal, execute_tools, reflect, verify, retry_broader, exit_success, exit_failure
-└── Edges: (see Navigator flowchart above)
+├── Nodes: parse_goal, execute_tools, reflect, verify, 
+│          retry_broader, exit_success, exit_failure
+└── Tools: nav_search_title, nav_explore_titles, 
+           nav_peek_content, nav_mark_found
 
-RetrievalLoop Sub-graph (StateGraph)
+RetrievalLoop Sub-graph
 ├── Entry Point: "init_loop"
-├── Nodes: init_loop, process_seed, reflect, check_evidence, retry_search, 
-│          synthesize, validate, retry_synthesis, exit_success, exit_best_effort
-└── Edges: (see RetrievalLoop flowchart above)
+├── Nodes: init_loop, process_seed, reflect, check_evidence,
+│          retry_search, synthesize, validate, retry_synthesis,
+│          exit_success, exit_best_effort
+└── Features: Query-aware thresholds, adaptive radius,
+              scope expansion, synthesis retry
 ```
 
-## Execution Flow Example
+---
+
+## 🎯 Anthropic Principles Applied
+
+| Principle | Implementation |
+|-----------|----------------|
+| **"Start Simple"** | Deterministic navigation for clear structural queries |
+| **"Routing"** | Planner routes to appropriate handler based on query type |
+| **"Clear ACI"** | `get_chapter_info()` exposes document structure clearly |
+| **"Explicit Criteria"** | Query-aware evidence thresholds, not always asking LLM |
+| **"Control Costs"** | Skip unnecessary operations when possible |
+| **"Prompt Chaining"** | Sequential steps in deterministic navigation |
+
+---
+
+## 📝 Example Executions
+
+### Example 1: Structural Query
 
 ```
-User Query: "What are the key concepts in photosynthesis?"
+Query: "What are the review questions at the end of chapter 8?"
 
-1. Planner:
-   - Generates subqueries: ["photosynthesis key concepts", "light reactions", ...]
-   - Sets top_k=8, radius=3, max_seeds=5
-   - No structural intent detected
-
-2. Navigate:
-   - No structural intent → skip navigation
-   - Returns empty structural_seeds
-
-3. Retrieve:
-   - Semantic search with subqueries
-   - Selects top 5 seeds
-
-4. RetrievalLoop Sub-graph:
-   
-   init_loop:
-   - Initialize state with 5 seeds
-   
-   process_seed (seed 1):
-   - Grade: "high"
-   - Adaptive radius: 3 + 2 = 5
-   - Expand and grade neighbors
-   - Add to evidence pool
-   
-   reflect:
-   - high=2, medium=3
-   - Action: "continue"
-   
-   process_seed (seed 2):
-   - Grade: "medium"
-   - Radius: 3
-   - Add to evidence pool
-   
-   reflect:
-   - high=3, medium=5
-   - Early exit condition met!
-   - Action: "early_exit"
-   
-   check_evidence:
-   - Sufficient (high >= 3)
-   - Proceed to synthesis
-   
-   synthesize:
-   - Generate answer with full text for high-grade nodes
-   
-   validate:
-   - Citations OK
-   - Status: "success"
-   
-   exit_success:
-   - Return final answer
-
-5. Result:
-   - Answer with citations
-   - Evidence pool
-   - Validation results
+┌─ PLANNER ─────────────────────────────────────────────────────────┐
+│ query_type: structural                                            │
+│ route: structural_only                                            │
+│ structural_hints:                                                 │
+│   chapter: 8                                                      │
+│   position: end                                                   │
+│   keywords: [review, questions]                                   │
+└───────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─ NAVIGATE (DETERMINISTIC) ────────────────────────────────────────┐
+│ get_chapter_info(8) → nodes 331-368                               │
+│ Filter by position: last 10 nodes                                 │
+│ Match keywords: 3 matches found                                   │
+│ Time: ~10ms | LLM calls: 0                                        │
+└───────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─ RETRIEVE ────────────────────────────────────────────────────────┐
+│ High-quality structural seeds found                               │
+│ → Skip semantic search                                            │
+│ Seeds: 3 structural, 0 semantic                                   │
+└───────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─ RETRIEVAL LOOP ──────────────────────────────────────────────────┐
+│ Process seed 0366: grade=low → skip                               │
+│ Process seed 0367: grade=medium → expand                          │
+│ Evidence: high=1, medium=1                                        │
+│ Threshold (structural): 1 high OR 2 medium ✓                      │
+│ → Sufficient! Proceed to synthesis                                │
+└───────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─ RESULT ──────────────────────────────────────────────────────────┐
+│ Answer with review questions from Chapter 8                       │
+│ Citations: [Node 0366], [Node 0367]                               │
+│ Total time: ~25 seconds                                           │
+│ Total LLM calls: ~8 (planner + grading + synthesis)               │
+└───────────────────────────────────────────────────────────────────┘
 ```
 
-## Performance Characteristics
+### Example 2: Conceptual Query
 
-- **Max Seeds per Scope**: 5 → 7 → 10
-- **Max Iterations per Scope**: 15
-- **Max Scope Levels**: 3 (focused → expanded → broad)
-- **Max Synthesis Retries**: 2
-- **Adaptive Radius**: +2 for high-grade seeds
-- **Total LLM Calls** (typical case):
-  - Planner: 1
-  - Navigator: 0-24 (if structural)
-  - RetrievalLoop: 2-4 per seed (grade + batch) + 1 reflect + 1 synthesize
-  - **Total**: ~10-30 calls (with early exit: as low as 5)
+```
+Query: "What is the difference between dominant and recessive traits?"
 
-## Quick Reference
+┌─ PLANNER ─────────────────────────────────────────────────────────┐
+│ query_type: conceptual                                            │
+│ route: semantic_only                                              │
+│ structural_hints: None                                            │
+└───────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─ NAVIGATE ────────────────────────────────────────────────────────┐
+│ Route = semantic_only                                             │
+│ → SKIP NAVIGATION                                                 │
+│ Time: ~0ms | LLM calls: 0                                         │
+└───────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─ RETRIEVE ────────────────────────────────────────────────────────┐
+│ Semantic search with query                                        │
+│ Seeds: 0 structural, 5 semantic                                   │
+└───────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─ RETRIEVAL LOOP ──────────────────────────────────────────────────┐
+│ Process seed 0342: grade=high → expand with radius+2              │
+│ Evidence: high=2, medium=3                                        │
+│ Threshold (conceptual): 3 high OR 2h+3m ✓                         │
+│ → Sufficient! Proceed to synthesis                                │
+└───────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─ RESULT ──────────────────────────────────────────────────────────┐
+│ Answer explaining dominant vs recessive traits                    │
+│ Citations: [Node 0342], [Node 0340], [Node 0343], ...             │
+│ Total time: ~20 seconds                                           │
+│ Total LLM calls: ~10 (planner + grading + synthesis)              │
+└───────────────────────────────────────────────────────────────────┘
+```
 
-### Main Functions
+---
 
-| Function | Location | Purpose |
-|----------|----------|---------|
-| `query_agent()` | Entry point | Sets up and runs the agent |
-| `create_agent()` | Graph builder | Creates both sub-graphs and main graph |
-| `run_retrieval_loop()` | Wrapper | Invokes RetrievalLoop sub-graph |
-| `navigate_structure()` | Wrapper | Invokes Navigator sub-graph |
-
-### Optimizations
-
-1. **Skip semantic search**: When Navigator finds high-quality structural seeds
-2. **Early exit**: When excellent evidence is found (5+ high or 3+ high + 4+ medium)
-3. **Adaptive radius**: High-grade seeds get +2 expansion radius
-4. **Full text for high-grade**: No truncation for high-quality nodes
-5. **Scope expansion**: Automatic retry with broader parameters if evidence insufficient
-6. **Synthesis retry**: Feedback-driven retry for citation issues
+*Last updated: January 2026*
+*Architecture version: 2.0 (Anthropic-style routing)*
