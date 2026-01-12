@@ -83,7 +83,7 @@ def query_agent(
         return AgentResult(
             query=query,
             answer=result["answer"],
-            iteration_count=result["iteration_count"],
+            evidence_count=result["evidence_count"],
             title_collection=title_collection,
             text_collection=text_collection,
             success=True,
@@ -94,7 +94,7 @@ def query_agent(
         return AgentResult(
             query=query,
             answer="",
-            iteration_count=0,
+            evidence_count=0,
             title_collection=title_collection,
             text_collection=text_collection,
             success=False,
@@ -142,7 +142,7 @@ def evaluate_index(
     results = []
     successful = 0
     failed = 0
-    total_iterations = 0
+    total_evidence = 0
     total_response_length = 0
     
     for i, query in enumerate(queries, 1):
@@ -157,16 +157,16 @@ def evaluate_index(
         )
         
         results.append(result)
-        
+
         if result.success:
             successful += 1
-            total_iterations += result.iteration_count
+            total_evidence += result.evidence_count
             total_response_length += len(result.answer)
         else:
             failed += 1
-    
+
     # Calculate averages
-    avg_iterations = total_iterations / successful if successful > 0 else 0
+    avg_evidence = total_evidence / successful if successful > 0 else 0
     avg_response_length = total_response_length / successful if successful > 0 else 0
     
     # Save detailed results if requested
@@ -184,7 +184,7 @@ def evaluate_index(
         total_queries=len(queries),
         successful=successful,
         failed=failed,
-        avg_iteration_count=avg_iterations,
+        avg_evidence_count=avg_evidence,
         avg_response_length=avg_response_length,
         chroma_dir=chroma_dir,
         config=config,

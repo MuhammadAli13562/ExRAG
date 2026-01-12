@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     agent_temperature: float = 0.0
     retrieval_top_k: int = 5
     retrieval_similarity_threshold: float = 0.5
-    max_agent_iterations: int = 15
+    max_agent_iterations: int = 3
     agent_recursion_limit: int = 25
     max_exploration_depth: int = 10
     default_exploration_count: int = 3

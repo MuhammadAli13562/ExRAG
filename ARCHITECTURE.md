@@ -194,23 +194,15 @@
 ┌─────────────────────────┐
 │ LangGraph Agent         │
 │ ┌─────────────────────┐ │
-│ │ 1. search_by_title()│ │
+│ │ 1. planner()        │ │
 │ │    ▼                │ │
-│ │ 2. search_by_text() │ │
+│ │ 2. retrieve()       │ │
 │ │    ▼                │ │
-│ │ 3. explore_nodes()  │ │
+│ │ 3. expand()         │ │
 │ │    ▼                │ │
-│ │ 4. synthesize       │ │
-│ └─────────────────────┘ │
-└─────┬───────────────────┘
-      │
-      ▼
-┌─────────────────────────┐
-│ Tool: search_by_title() │
-│ ┌─────────────────────┐ │
-│ │ ChromaDB query      │ │
-│ │ Collection: titles  │ │
-│ │ Returns: node_ids   │ │
+│ │ 4. synthesize()     │ │
+│ │    ▼                │ │
+│ │ 5. validate()       │ │
 │ └─────────────────────┘ │
 └─────┬───────────────────┘
       │
